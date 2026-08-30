@@ -121,6 +121,16 @@ def create_advertisement(combustion_bits, connectable=True):
         raw=None,
     )
 
+def gauge_payload(serial: bytes = b"G000000123", temp_c: float = 150.0) -> bytes:
+    """Build a Giant Grill Gauge self-advertisement (product type 3)."""
+    p = bytearray(22)
+    p[0] = 0x03
+    p[1:11] = serial
+    p[11:13] = int((temp_c + 20.0) / 0.1).to_bytes(2, "little")
+    p[13] = 0x01  # sensor present
+    return bytes(p)
+
+
 def create_combustion_bits(
         probe_id: int = 1,
         mode: int = ProbeMode.normal.value,

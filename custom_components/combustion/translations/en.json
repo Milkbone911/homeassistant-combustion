@@ -7,8 +7,8 @@
         },
         "abort": {
             "not_supported": "This Combustion device does not broadcast usable data.",
-            "updated_entry": "This device has been added to the existing Combustion Meatnet.",
-            "already_configured": "The Combustion Meatnet is already configured."
+            "already_configured": "The Combustion Meatnet is already configured.",
+            "no_devices_found": "No Combustion devices found. Turn on a probe, gauge, booster or display within Bluetooth range and try again."
         },
         "error": {
             "unknown": "Unknown error occurred."

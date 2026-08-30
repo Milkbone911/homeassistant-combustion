@@ -1,6 +1,7 @@
 """Test Config Flow."""
 
 import pytest
+from homeassistant import config_entries
 from homeassistant.config_entries import SOURCE_BLUETOOTH
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
@@ -9,6 +10,9 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from custom_components.combustion.const import DOMAIN
 from tests.utils.bt_utils import (
     COMBUSTION_SERVICE_INFO,
+    create_advertisement,
+    gauge_payload,
+    inject_bt_advertisement,
 )
 
 
@@ -50,3 +54,35 @@ async def test_bluetooth_discovery_already_setup(hass: HomeAssistant) -> None:
     )
     assert result["type"] == FlowResultType.ABORT
     assert result["reason"] == "already_configured"
+
+
+async def test_gauge_discovery_creates_entry(hass: HomeAssistant):
+    """A Giant Grill Gauge advertisement should be able to bootstrap the entry."""
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": config_entries.SOURCE_BLUETOOTH},
+        data=create_advertisement(gauge_payload()),
+    )
+    assert result["type"] is FlowResultType.FORM
+
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+
+
+async def test_user_step_finds_discovered_device(hass: HomeAssistant):
+    """The manual (user) flow should adopt a device already seen by discovery."""
+    inject_bt_advertisement(hass, create_advertisement(gauge_payload()))
+    await hass.async_block_till_done()
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": config_entries.SOURCE_USER}
+    )
+    assert result["type"] is FlowResultType.FORM
+
+
+async def test_user_step_aborts_with_nothing_in_range(hass: HomeAssistant):
+    """The manual (user) flow should abort cleanly when nothing is in range."""
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": config_entries.SOURCE_USER}
+    )
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "no_devices_found"

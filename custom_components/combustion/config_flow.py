@@ -5,12 +5,13 @@ from typing import Any
 
 import voluptuous as vol
 from homeassistant import config_entries
-from homeassistant.components.bluetooth import BluetoothServiceInfoBleak
+from homeassistant.components.bluetooth import (
+    BluetoothServiceInfoBleak,
+    async_discovered_service_info,
+)
 from homeassistant.core import callback
 
-from custom_components.combustion.combustion_ble.combustion_probe_data import (
-    CombustionProbeData,
-)
+from custom_components.combustion.bluetooth_listener import parse_advertisement
 
 from .const import (
     CONF_AVAILABILITY_TIMEOUT,
@@ -35,8 +36,8 @@ class CombustionFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
     VERSION = 1
     def __init__(self) -> None:
         """Initialize the config flow."""
-        self._discovered_adv: CombustionProbeData | None = None
-        self._all_discovered_devices: dict[str, CombustionProbeData] = {}
+        self._discovered_adv: object | None = None
+        self._all_discovered_devices: dict[str, object] = {}
 
     @staticmethod
     @callback
@@ -53,24 +54,11 @@ class CombustionFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
         await self.async_set_unique_id("combustion_meatnet")
         self._abort_if_unique_id_configured()
 
-        data = CombustionProbeData.from_advertisement(discovery_info)
-        if data is None or not data.valid:
+        data = parse_advertisement(discovery_info)
+        if data is None:
             return self.async_abort(reason="not_supported")
 
         self._all_discovered_devices[discovery_info.address] = data
-
-        entries = self._async_current_entries()
-        if entries:
-            LOGGER.debug("Discovered new device, but we already have an entry created.")
-            assert len(entries) == 1
-            assert self._add_device_to_entry(entries[0], discovery_info.address, data)
-            return self.async_abort(reason="updated_entry")
-
-        # # For now, only a single "meatnet" is supported. This prevents each device from showing as an independent integration.
-        # # Instead we ask to configure once, and create devices for each of the entities on the meatnet.
-        # await self.async_set_unique_id("combustion_meatnet")
-        # self._abort_if_unique_id_configured()
-
         self._discovered_adv = data
 
         self.context["title_placeholders"] = {
@@ -80,12 +68,26 @@ class CombustionFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
 
         return await self.async_step_confirm()
 
+    async def async_step_user(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.FlowResult:
+        """Manual setup: adopt any Combustion device already in range."""
+        await self.async_set_unique_id("combustion_meatnet")
+        self._abort_if_unique_id_configured()
+
+        for discovery_info in async_discovered_service_info(self.hass, False):
+            data = parse_advertisement(discovery_info)
+            if data is not None:
+                self._discovered_adv = data
+                self._all_discovered_devices[discovery_info.address] = data
+                return await self.async_step_confirm()
+
+        return self.async_abort(reason="no_devices_found")
 
     async def async_step_confirm(
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.FlowResult:
         """Confirm a single device."""
-        assert self._discovered_adv is not None
         if user_input is not None:
             return await self._async_create_entry_from_discovery(user_input)
 
@@ -101,8 +103,6 @@ class CombustionFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
         self, user_input: dict[str, Any]
     ) -> config_entries.FlowResult:
         """Create an entry from a discovery."""
-        assert self._discovered_adv is not None
-
         devices = []
         for (addr, _device) in self._all_discovered_devices.items():
             devices.append({
@@ -118,26 +118,6 @@ class CombustionFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_DEVICES: devices,
             },
         )
-
-    def _add_device_to_entry(self, entry: config_entries.ConfigEntry, address: str, device: CombustionProbeData) -> bool:
-        """Add a Combustion device to an existing entry."""
-        devices = entry.data.get(CONF_DEVICES, []).copy()
-        if any(d.get("address") == address for d in devices):
-            # Already known. Updating the entry anyway would fire the entry
-            # update listener and needlessly reload the whole integration.
-            return True
-
-        LOGGER.debug("Adding device to existing entry")
-        devices.append({
-            "name": "Combustion meatnet",
-            "address": address,
-            "product_type": 2 # hardcode meatnet probe
-        })
-
-        return self.hass.config_entries.async_update_entry(entry, data={
-            **entry.data,
-            CONF_DEVICES: devices
-        })
 
 
 class CombustionOptionsFlowHandler(config_entries.OptionsFlow):

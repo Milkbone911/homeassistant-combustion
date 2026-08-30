@@ -20,6 +20,43 @@ _LOGGER = LOGGER.getChild('bluetooth-listener')
 _PROBE_DATA_TYPES = (CombustionProductType.PROBE, CombustionProductType.MEAT_NET_NODE)
 
 
+def parse_advertisement(service_info: BluetoothServiceInfoBleak):
+    """Parse a manufacturer advertisement into device data, or None to discard.
+
+    Shared by the bluetooth listener and the config flow so that discovery
+    accepts exactly the set of devices the integration can actually represent.
+    """
+    payload = service_info.manufacturer_data.get(BT_MANUFACTURER_ID)
+    if not payload:
+        return None
+
+    product_type = CombustionProductType.from_byte(payload[0])
+
+    if product_type in _PROBE_DATA_TYPES:
+        probe_data = CombustionProbeData.from_advertisement(service_info)
+        if probe_data is None or not probe_data.valid:
+            _LOGGER.debug("Discarding invalid advertisement from [%s]", service_info.address)
+            return None
+        return probe_data
+
+    if product_type == CombustionProductType.GAUGE:
+        gauge_data = CombustionGaugeData.from_advertisement(service_info)
+        if gauge_data is None or not gauge_data.valid:
+            _LOGGER.debug("Discarding invalid gauge advertisement from [%s]", service_info.address)
+            return None
+        return gauge_data
+
+    if product_type in (CombustionProductType.BOOSTER, CombustionProductType.DISPLAY):
+        node_data = NodeData.from_advertisement(service_info)
+        if node_data is None or not node_data.valid:
+            return None
+        return node_data
+
+    # Engines and unknown future products aren't handled yet.
+    _LOGGER.debug("Ignoring %s advertisement from [%s]", product_type.name, service_info.address)
+    return None
+
+
 class BluetoothListener:
     """Listen for all Bluetooth advertisements from the Combustion, Inc. manufacturer."""
 
@@ -75,32 +112,4 @@ class BluetoothListener:
 
     def _parse_advertisement(self, service_info: BluetoothServiceInfoBleak):
         """Parse a manufacturer advertisement into device data, or None to discard."""
-        payload = service_info.manufacturer_data.get(BT_MANUFACTURER_ID)
-        if not payload:
-            return None
-
-        product_type = CombustionProductType.from_byte(payload[0])
-
-        if product_type in _PROBE_DATA_TYPES:
-            probe_data = CombustionProbeData.from_advertisement(service_info)
-            if probe_data is None or not probe_data.valid:
-                _LOGGER.debug("Discarding invalid advertisement from [%s]", service_info.address)
-                return None
-            return probe_data
-
-        if product_type == CombustionProductType.GAUGE:
-            gauge_data = CombustionGaugeData.from_advertisement(service_info)
-            if gauge_data is None or not gauge_data.valid:
-                _LOGGER.debug("Discarding invalid gauge advertisement from [%s]", service_info.address)
-                return None
-            return gauge_data
-
-        if product_type in (CombustionProductType.BOOSTER, CombustionProductType.DISPLAY):
-            node_data = NodeData.from_advertisement(service_info)
-            if node_data is None or not node_data.valid:
-                return None
-            return node_data
-
-        # Engines and unknown future products aren't handled yet.
-        _LOGGER.debug("Ignoring %s advertisement from [%s]", product_type.name, service_info.address)
-        return None
+        return parse_advertisement(service_info)
