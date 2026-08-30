@@ -8,26 +8,26 @@ readme = "README.md"
 packages = [{ include = "combustion", from = "custom_components" }]
 
 [tool.poetry.dependencies]
-python = ">=3.11,<3.13"
-bitstring = "^4.1.4"
+python = ">=3.14.2,<3.15"
 
 [tool.poetry.group.dev.dependencies]
-bluetooth_sensor_state_data = ">=1.6.1"
 colorlog = "==6.9.0"
-homeassistant = "==2023.11.1"
-pip = ">=21.0,<24.1"
+homeassistant = "==2026.8.2"
 ruff = "==0.11.5"
 
 [tool.poetry.group.test.dependencies]
 pytest = ">=7.3.1"
 pytest-cov = ">=4.0.0"
-pytest-homeassistant-custom-component = ">=0.13.45"
-bleak-retry-connector = "==3.4.0"
-pyserial = "==3.5"
-bluetooth-adapters = "==0.18.0"
-bluetooth-auto-recovery = "==1.3.0"
-aiohttp_cors = "==0.7.0"
-pyudev = "==0.24.1"
+pytest-homeassistant-custom-component = "==0.13.356"
+# homeassistant.components.bluetooth unconditionally imports
+# homeassistant.components.usb, whose manifest.json requires these two
+# packages. Neither the homeassistant nor pytest-homeassistant-custom-component
+# wheels pull them in (HA's real requirements_all.txt bundling does this at
+# image-build time, which we don't have here), so collection fails without
+# them. Pinned to the exact versions homeassistant/components/usb/manifest.json
+# declares for 2026.8.2.
+aiousbwatcher = "==1.1.2"
+serialx = "==1.8.2"
 
 [build-system]
 requires = ["poetry-core"]
@@ -50,7 +50,6 @@ output = "test_results/cov_xml/coverage.xml"
 [tool.pytest.ini_options]
 addopts = [
     "-rxf",
-    "-x",
     "-v",
     "-l",
     "--asyncio-mode=auto",

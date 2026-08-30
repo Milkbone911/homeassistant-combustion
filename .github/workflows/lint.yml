@@ -19,11 +19,11 @@ jobs:
         - name: "Set up Python"
           uses: actions/setup-python@v5
           with:
-            python-version: "3.11"
+            python-version: "3.14"
             cache: "pip"
 
         - name: "Install requirements"
-          run: python3 -m pip install poetry~=1.7 && poetry install
+          run: python3 -m pip install poetry~=2.3 && poetry install
 
         - name: "Run"
           run: poetry run ./scripts/lint

@@ -2,7 +2,6 @@
 from typing import Any
 from unittest.mock import patch
 
-from bitstring import Bits
 from bleak.backends.scanner import AdvertisementData, BLEDevice
 from combustion.combustion_ble.advertising_data import CombustionProductType
 from combustion.combustion_ble.mode_id import ProbeMode
@@ -84,6 +83,8 @@ COMBUSTION_SERVICE_INFO = BluetoothServiceInfoBleak(
     ),
     connectable=True,
     time=0,
+    tx_power=-127,
+    raw=None,
 )
 
 def inject_bt_advertisement(hass: HomeAssistant, service_info: BluetoothServiceInfoBleak):
@@ -116,6 +117,8 @@ def create_advertisement(combustion_bits, connectable=True):
         advertisement=adv,
         connectable=connectable,
         time=0,
+        tx_power=-127,
+        raw=None,
     )
 
 def create_combustion_bits(
@@ -130,8 +133,8 @@ def create_combustion_bits(
         battery_ok: bool = True,
     ):
     """Create a bit representation for use in a BT advertisement."""
-    device_type = CombustionProductType[device_type].value.to_bytes(1)
-    serial_number =  Bits(hex=f'0x{serial_number}')
+    device_type = CombustionProductType[device_type].value.to_bytes(1, "big")
+    serial_number = bytes.fromhex(serial_number)
 
     if not temperature_data:
         temperature_data = [20.0, 21.1, 22.2, 23.3, 24.4, 25.5, 26.6, 27.7]
@@ -156,14 +159,14 @@ def create_combustion_bits(
 
     bytes_.reverse()
 
-    temperatures = Bits(bytes(bytes_))
+    temperatures = bytes(bytes_)
 
     # Mode id
     id_value = probe_id - 1
     color_value = 0
     mode_value = mode
     # Combine these values into a byte
-    mode_id  = Bits(((id_value << 5) | (color_value << 2) | mode_value).to_bytes())
+    mode_id = bytes([(id_value << 5) | (color_value << 2) | mode_value])
 
     # Virtual Sensors
     core_value = core_sensor_id - 1
@@ -176,15 +179,18 @@ def create_combustion_bits(
             | ((ambient_value & 0x3) << 5)
 
     # Battery Status
-    status_value = 1 if battery_ok else 0
+    status_value = 0 if battery_ok else 1
 
-    battery_virtual_byte = Bits(((status_value & 0x1) | (virtual_byte << 1)).to_bytes())
+    battery_virtual_byte = bytes([(status_value & 0x1) | (virtual_byte << 1)])
 
-    network_info_byte = Bits(int.to_bytes(0))
+    network_info_byte = bytes([0])
 
     # Real probe advertisements end at the network-info byte (no overheating
     # byte); overheating is derived from the decoded temperatures.
-    return  (device_type + serial_number + temperatures + mode_id + battery_virtual_byte + network_info_byte).tobytes()
+    return (
+        device_type + serial_number + temperatures + mode_id
+        + battery_virtual_byte + network_info_byte
+    )
 
 
 

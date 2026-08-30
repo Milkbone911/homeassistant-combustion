@@ -58,6 +58,27 @@ async def test_entity_creation(hass: HomeAssistant):
     assert len(disabled_sensors) == 9
     assert len(binary_sensors) == 2
 
+@pytest.mark.asyncio
+async def test_probe_advertisement_creates_entities(hass: HomeAssistant):
+    """A single probe advertisement must produce the full entity set."""
+    entry = MockConfigEntry(
+        domain=DOMAIN, version=1, data={}, title="Meatnet",
+        unique_id="combustion_meatnet",
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    inject_bt_advertisement(hass, create_advertisement(create_combustion_bits()))
+    await hass.async_block_till_done()
+
+    reg = entity_registry.async_get(hass)
+    entities = entity_registry.async_entries_for_config_entry(reg, entry.entry_id)
+    assert len(entities) == 16
+
+    core = hass.states.get("sensor.predictive_thermometer_cc1c0010_core_temperature")
+    assert core is not None
+    assert core.state == "20.0"
 
 @pytest.mark.asyncio
 async def test_entity_creation_non_connectable(hass: HomeAssistant):
@@ -454,6 +475,51 @@ async def test_mode_and_overheating_sensors(hass: HomeAssistant):
         overheat_state = hass.states.get(overheat_id)
         assert overheat_state.state == 'on'
         assert overheat_state.attributes['overheating_sensors'] == [2, 8]
+
+
+@pytest.mark.asyncio
+async def test_battery_status_binary_sensor(hass: HomeAssistant):
+    """battery_ok maps to the correct binary_sensor polarity.
+
+    BatteryStatus is OK=0x00, LOW=0x01 (battery_status_virtual_sensors.py:8-9).
+    Regression test for the create_combustion_bits(battery_ok=...) polarity
+    fix: bt_utils.py used to set the bit when the battery was healthy,
+    inverted from the spec.
+    """
+    import time as real_time
+    from unittest.mock import patch
+
+    mock_entry = MockConfigEntry(
+        unique_id="test_battery_status",
+        domain=DOMAIN,
+        version=1,
+        data={},
+        title="Meatnet",
+    )
+
+    await _setup_config_entry(hass, mock_entry)
+
+    ok = create_advertisement(create_combustion_bits(battery_ok=True))
+    # First advert triggers the one-time entry reload; re-inject afterwards.
+    inject_bt_advertisement(hass, ok)
+    await hass.async_block_till_done()
+    inject_bt_advertisement(hass, ok)
+    await hass.async_block_till_done()
+
+    er = entity_registry.async_get(hass)
+    battery_id = next(e.entity_id for e in er.entities.values() if (e.unique_id or '').endswith('--battery'))
+    assert hass.states.get(battery_id).state == 'off'  # battery ok -> not low
+
+    low = create_advertisement(create_combustion_bits(battery_ok=False))
+    # Advance past the notify throttle window for this device.
+    with patch(
+        'custom_components.combustion.probe_manager.time.monotonic',
+        return_value=real_time.monotonic() + 10.0,
+    ):
+        inject_bt_advertisement(hass, low)
+        await hass.async_block_till_done()
+
+        assert hass.states.get(battery_id).state == 'on'  # battery low -> problem
 
 
 @pytest.mark.asyncio
