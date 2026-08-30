@@ -1,7 +1,12 @@
 # The contents of this file is based on https://github.com/home-assistant/core/blob/dev/pyproject.toml
 
-target-version = "py310"
+# The project floor is Python 3.14.2 (see pyproject.toml), but the pinned
+# dev dependency ruff==0.11.5 does not yet recognize "py314" as a valid
+# target-version value ("py313" is the newest it supports). Bump this to
+# "py314" when the ruff pin is upgraded.
+target-version = "py313"
 
+[lint]
 select = [
     "B007",    # Loop control variable {name} not used within loop body
     "B014",    # Exception handler with duplicate exception
@@ -42,11 +47,11 @@ ignore = [
     "T201", # `print` found
 ]
 
-[flake8-pytest-style]
+[lint.flake8-pytest-style]
 fixture-parentheses = false
 
-[pyupgrade]
+[lint.pyupgrade]
 keep-runtime-typing = true
 
-[mccabe]
+[lint.mccabe]
 max-complexity = 25
