@@ -81,6 +81,42 @@ async def test_probe_advertisement_creates_entities(hass: HomeAssistant):
     assert core.state == "20.0"
 
 @pytest.mark.asyncio
+async def test_second_advertisement_updates_state(hass: HomeAssistant):
+    """Entity state must follow later advertisements, not just the first."""
+    import time as real_time
+    from unittest.mock import patch
+
+    entry = MockConfigEntry(
+        domain=DOMAIN, version=1, data={}, title="Meatnet",
+        unique_id="test_second_advertisement",
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    inject_bt_advertisement(hass, create_advertisement(create_combustion_bits()))
+    await hass.async_block_till_done()
+
+    core = hass.states.get("sensor.predictive_thermometer_cc1c0010_core_temperature")
+    assert core.state == "20.0"
+
+    # Advance past the notify throttle window for this device.
+    with patch(
+        'custom_components.combustion.probe_manager.time.monotonic',
+        return_value=real_time.monotonic() + 10.0,
+    ):
+        inject_bt_advertisement(
+            hass,
+            create_advertisement(
+                create_combustion_bits(temperature_data=[55.0] + [21.1] * 7)
+            ),
+        )
+        await hass.async_block_till_done()
+
+        core = hass.states.get("sensor.predictive_thermometer_cc1c0010_core_temperature")
+        assert core.state == "55.0"
+
+@pytest.mark.asyncio
 async def test_entity_creation_non_connectable(hass: HomeAssistant):
     """Verify entities are created from a non-connectable advertisement.
 

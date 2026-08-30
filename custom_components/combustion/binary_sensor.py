@@ -9,7 +9,6 @@ from homeassistant.components.binary_sensor import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers.entity import EntityPlatformState
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from custom_components.combustion.probe_manager import ProbeManager
@@ -112,8 +111,7 @@ class BaseCombustionBinarySensor(CombustionEntity, BinarySensorEntity):
     @callback
     def on_update(self):
         """Process device updates."""
-        if self._platform_state == EntityPlatformState.ADDED:
-            self.async_schedule_update_ha_state()
+        self.async_write_ha_state()
 
     def _device_data(self):
         """Return current data for this device, or None if unavailable."""

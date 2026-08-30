@@ -17,7 +17,6 @@ from homeassistant.const import (
     UnitOfTemperature,
 )
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers.entity import EntityPlatformState
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from custom_components.combustion.combustion_ble.combustion_probe_data import (
@@ -145,8 +144,7 @@ class CombustionGaugeTemperatureSensor(CombustionEntity, SensorEntity):
     @callback
     def on_update(self):
         """Process gauge updates."""
-        if self._platform_state == EntityPlatformState.ADDED:
-            self.async_schedule_update_ha_state()
+        self.async_write_ha_state()
 
     @property
     def native_value(self) -> float | None:
@@ -189,8 +187,7 @@ class CombustionGaugeZoneSensor(CombustionEntity, SensorEntity):
     @callback
     def on_update(self):
         """Process gauge updates."""
-        if self._platform_state == EntityPlatformState.ADDED:
-            self.async_schedule_update_ha_state()
+        self.async_write_ha_state()
 
     @property
     def native_value(self) -> str | None:
@@ -230,8 +227,7 @@ class CombustionModeSensor(CombustionEntity, SensorEntity):
     @callback
     def on_update(self):
         """Process probe updates."""
-        if self._platform_state == EntityPlatformState.ADDED:
-            self.async_schedule_update_ha_state()
+        self.async_write_ha_state()
 
     @property
     def native_value(self) -> str | None:
@@ -286,9 +282,8 @@ class CombustionRSSISensor(CombustionEntity, SensorEntity):
     @callback
     def on_update(self):
         """Process probe updates."""
-        _LOGGER.debug("Sensor [%s] with state [%s] has been notified of an update", self.unique_id, self._platform_state)
-        if self._platform_state == EntityPlatformState.ADDED:
-            self.async_schedule_update_ha_state()
+        _LOGGER.debug("Sensor [%s] has been notified of an update", self.unique_id)
+        self.async_write_ha_state()
 
     @property
     def native_value(self) -> str:
@@ -313,8 +308,7 @@ class BaseCombustionTemperatureSensor(CombustionEntity, SensorEntity):
     def on_update(self):
         """Process probe updates."""
         _LOGGER.debug("Sensor [%s] has been notified of an update", self.unique_id)
-        if self._platform_state == EntityPlatformState.ADDED:
-            self.async_schedule_update_ha_state()
+        self.async_write_ha_state()
 
     @property
     def should_poll(self) -> bool:
@@ -530,8 +524,7 @@ class BaseCombustionPredictionSensor(CombustionEntity, SensorEntity):
     @callback
     def on_update(self):
         """Process prediction updates."""
-        if self._platform_state == EntityPlatformState.ADDED:
-            self.async_schedule_update_ha_state()
+        self.async_write_ha_state()
 
     @property
     def should_poll(self) -> bool:
