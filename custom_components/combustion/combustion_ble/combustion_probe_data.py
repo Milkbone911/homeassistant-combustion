@@ -2,18 +2,12 @@
 from __future__ import annotations
 
 from home_assistant_bluetooth import BluetoothServiceInfoBleak
-from sensor_state_data import description
 
 from custom_components.combustion.const import BT_MANUFACTURER_ID
 
 from .advertising_data import AdvertisingData
 from .battery_status_virtual_sensors import BatteryStatus
 from .mode_id import ProbeMode
-
-MODE_SENSOR_DESCRIPTION = description.BaseSensorDescription(
-    device_class="enum",
-    native_unit_of_measurement=None,
-)
 
 # Serial Number value indicating 'No Probe'
 INVALID_PROBE_SERIAL_NUMBER = 0

@@ -19,7 +19,6 @@ from homeassistant.const import (
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity import EntityPlatformState
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from sensor_state_data import Units
 
 from custom_components.combustion.combustion_ble.combustion_probe_data import (
     CombustionProbeData,
@@ -35,7 +34,7 @@ _LOGGER = LOGGER.getChild('sensor')
 DEVICE_NAMES = {'GAUGE': 'Grill Gauge', 'BOOSTER': 'Booster', 'DISPLAY': 'Display'}
 
 VIRTUAL_TEMPERATURE_SENSOR_DESCRIPTION = SensorEntityDescription(
-    key=f"{SensorDeviceClass.TEMPERATURE}_{Units.TEMP_CELSIUS}",
+    key=f"{SensorDeviceClass.TEMPERATURE}_{UnitOfTemperature.CELSIUS}",
     device_class=SensorDeviceClass.TEMPERATURE,
     native_unit_of_measurement=UnitOfTemperature.CELSIUS,
     state_class=SensorStateClass.MEASUREMENT,
@@ -43,7 +42,7 @@ VIRTUAL_TEMPERATURE_SENSOR_DESCRIPTION = SensorEntityDescription(
 )
 
 TEMPERATURE_SENSOR_DESCRIPTION = SensorEntityDescription(
-    key=f"{SensorDeviceClass.TEMPERATURE}_{Units.TEMP_CELSIUS}",
+    key=f"{SensorDeviceClass.TEMPERATURE}_{UnitOfTemperature.CELSIUS}",
     device_class=SensorDeviceClass.TEMPERATURE,
     native_unit_of_measurement=UnitOfTemperature.CELSIUS,
     state_class=SensorStateClass.MEASUREMENT,
@@ -52,42 +51,12 @@ TEMPERATURE_SENSOR_DESCRIPTION = SensorEntityDescription(
 )
 
 RSSI_SENSOR_DESCRIPTION = SensorEntityDescription(
-    key=f"{SensorDeviceClass.SIGNAL_STRENGTH}_{Units.SIGNAL_STRENGTH_DECIBELS_MILLIWATT}",
+    key=f"{SensorDeviceClass.SIGNAL_STRENGTH}_{SIGNAL_STRENGTH_DECIBELS_MILLIWATT}",
     device_class=SensorDeviceClass.SIGNAL_STRENGTH,
     native_unit_of_measurement=SIGNAL_STRENGTH_DECIBELS_MILLIWATT,
     state_class=SensorStateClass.MEASUREMENT,
     entity_registry_enabled_default=False,
 )
-
-SENSOR_DESCRIPTIONS = {
-    (
-        SensorDeviceClass.TEMPERATURE,
-        Units.TEMP_CELSIUS,
-    ): SensorEntityDescription(
-        key=f"{SensorDeviceClass.TEMPERATURE}_{Units.TEMP_CELSIUS}",
-        device_class=SensorDeviceClass.TEMPERATURE,
-        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
-        state_class=SensorStateClass.MEASUREMENT,
-    ),
-    (
-        SensorDeviceClass.ENUM.value,
-        None
-    ): SensorEntityDescription(
-        key=f"{SensorDeviceClass.ENUM}_mode",
-        device_class=SensorDeviceClass.ENUM,
-        options=['normal', 'instant_read', 'error', 'reserved', 'unknown']
-    ),
-    (
-        SensorDeviceClass.SIGNAL_STRENGTH,
-        Units.SIGNAL_STRENGTH_DECIBELS_MILLIWATT,
-    ): SensorEntityDescription(
-        key=f"{SensorDeviceClass.SIGNAL_STRENGTH}_{Units.SIGNAL_STRENGTH_DECIBELS_MILLIWATT}",
-        device_class=SensorDeviceClass.SIGNAL_STRENGTH,
-        native_unit_of_measurement=SIGNAL_STRENGTH_DECIBELS_MILLIWATT,
-        state_class=SensorStateClass.MEASUREMENT,
-        entity_registry_enabled_default=False,
-    ),
-}
 
 def _create_temperature_sensors(probe_manager: ProbeManager, probe_data: CombustionProbeData):
     sensors: list[BaseCombustionTemperatureSensor] = [
