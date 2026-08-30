@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import time
 from collections.abc import Callable
 
 from homeassistant.components import bluetooth
@@ -28,7 +29,16 @@ _LOGGER = LOGGER.getChild('connection')
 
 RECONNECT_MIN_SECONDS = 5
 RECONNECT_MAX_SECONDS = 300
+STABLE_CONNECTION_SECONDS = 30
 WRITE_TIMEOUT = 5.0
+# Bounds how long shutdown waits for a maintain task to unwind or a client to
+# disconnect. A wedged BLE adapter must not make the config entry unreloadable;
+# 10s is generous for a real GATT disconnect but short enough to not stall HA.
+SHUTDOWN_TIMEOUT_SECONDS = 10
+
+# Indirection so tests can script elapsed time for `_maintain_connection`
+# without patching `time.monotonic` itself, which the event loop also reads.
+_now = time.monotonic
 
 
 class ConnectionManager:
@@ -161,23 +171,36 @@ class ConnectionManager:
 
             disconnected = asyncio.Event()
             client = None
+            # How long to back off before the next attempt. Computed here but
+            # not slept on until after `finally` has released the client, so
+            # a flapping probe doesn't hold its GATT slot for the backoff
+            # window on top of no longer being useful.
+            delay = 0
             try:
                 client = await establish_connection(
                     BleakClient, ble_device, serial,
                     disconnected_callback=lambda _c, ev=disconnected: ev.set(),
                 )
-                backoff = RECONNECT_MIN_SECONDS
+                connected_at = _now()
                 await self._on_connected(serial, client)
                 await disconnected.wait()
+                if _now() - connected_at >= STABLE_CONNECTION_SECONDS:
+                    # The link was real; start the next retry cycle fresh.
+                    backoff = RECONNECT_MIN_SECONDS
+                else:
+                    # Connected and dropped straight away — treat as a failure
+                    # so a flapping probe cannot spin this loop.
+                    delay, backoff = backoff, min(backoff * 2, RECONNECT_MAX_SECONDS)
             except Exception:  # noqa: BLE001
                 _LOGGER.debug("Connection to [%s] failed", serial, exc_info=True)
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, RECONNECT_MAX_SECONDS)
+                delay, backoff = backoff, min(backoff * 2, RECONNECT_MAX_SECONDS)
             finally:
                 self._on_disconnected(serial)
                 if client is not None:
                     with contextlib.suppress(Exception):
                         await client.disconnect()
+            if delay:
+                await asyncio.sleep(delay)
 
     async def _on_connected(self, serial: str, client) -> None:
         """Enable notifications, then mark the client writable and announce it.
@@ -263,12 +286,51 @@ class ConnectionManager:
             )
 
     async def _async_shutdown(self) -> None:
-        """Cancel all connection tasks on unload."""
+        """Cancel connection tasks and await their teardown before unloading.
+
+        Cancelling a maintain task is not enough by itself: unload must wait
+        for the task to actually finish unwinding, because its `finally`
+        block is what calls `_on_disconnected` and `client.disconnect()`.
+        Returning before that completes can leave a probe connected, holding
+        its single GATT slot against the phone app, even though the entry
+        looks unloaded. The per-client disconnect loop below is a fallback,
+        not the primary mechanism: for a client whose task is still tracked
+        and gets awaited above, that task's own `finally` already popped it
+        out of `_clients`, so there is nothing left here to disconnect. It
+        only has real work to do for a client left behind by a task that
+        already exited on its own (so `task.done()` was true and it was never
+        cancelled) or that was never wrapped in a maintain task at all.
+
+        Both the task-teardown wait and each client disconnect are bounded by
+        `SHUTDOWN_TIMEOUT_SECONDS` so a wedged BLE adapter can't make the
+        config entry unreloadable.
+        """
+        tasks = list(self._tasks.values())
+        self._tasks.clear()
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            try:
+                async with asyncio.timeout(SHUTDOWN_TIMEOUT_SECONDS):
+                    await asyncio.gather(*tasks, return_exceptions=True)
+            except TimeoutError:
+                _LOGGER.warning(
+                    "Timed out after %ss waiting for %d connection task(s) to unwind during shutdown",
+                    SHUTDOWN_TIMEOUT_SECONDS, len(tasks),
+                )
+
+        clients = list(self._clients.values())
+        self._clients.clear()
+        for client in clients:
+            try:
+                async with asyncio.timeout(SHUTDOWN_TIMEOUT_SECONDS):
+                    await client.disconnect()
+            except TimeoutError:
+                _LOGGER.warning("Timed out after %ss disconnecting a client during shutdown", SHUTDOWN_TIMEOUT_SECONDS)
+            except Exception:  # noqa: BLE001
+                _LOGGER.debug("Error disconnecting a client during shutdown", exc_info=True)
+
         self._conn_listeners.clear()
         self._new_probe_listeners.clear()
         self._seen_probes.clear()
         self._probe_data.clear()
-        for task in self._tasks.values():
-            task.cancel()
-        self._tasks.clear()
-        self._clients.clear()
