@@ -72,7 +72,19 @@ async def test_gauge_discovery_creates_entry(hass: HomeAssistant):
 async def test_user_step_finds_discovered_device(hass: HomeAssistant):
     """The manual (user) flow should adopt a device already seen by discovery."""
     inject_bt_advertisement(hass, create_advertisement(gauge_payload()))
-    await hass.async_block_till_done()
+    # The injection also fires HA's automatic bluetooth discovery flow, as an
+    # eager background task that plain async_block_till_done does not wait
+    # for. Whether it reached async_step_bluetooth before the manual flow
+    # below was a scheduling race: if it did, the manual flow aborted with
+    # already_in_progress on the shared combustion_meatnet unique_id (the
+    # usual outcome on CI; dev boxes usually won the race and passed). Wait
+    # for it deterministically, then clear it — this test is about adopting a
+    # device from history, not about colliding with an open discovery flow.
+    await hass.async_block_till_done(wait_background_tasks=True)
+    discovery_flows = hass.config_entries.flow.async_progress_by_handler(DOMAIN)
+    assert [flow["context"]["source"] for flow in discovery_flows] == ["bluetooth"]
+    for flow in discovery_flows:
+        hass.config_entries.flow.async_abort(flow["flow_id"])
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": config_entries.SOURCE_USER}
     )
