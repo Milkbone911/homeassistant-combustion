@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+
 import pytest
 
 from custom_components.combustion.cloud.auth import (
