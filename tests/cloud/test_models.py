@@ -1,4 +1,6 @@
 """S1 strict models: reference-compatible positives and intentionally stricter negatives."""
+# ruff: noqa: D103
+
 from __future__ import annotations
 
 import json
