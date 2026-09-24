@@ -2,6 +2,9 @@
 
 Integrate [Combustion](https://combustion.inc) predictive probes and gauges into Home Assistant.
 
+> **Milkbone911 fork — Cook Library development:** The optional cloud/history/cook extension is **not implemented or released** in this baseline. For the S0 source pin, supported test environment and gated S1 development scope, see [Cook Library S0 baseline](docs/cook-library/S0_BASELINE.md) and [S1 handoff](docs/cook-library/S1_HANDOFF.md). The BLE installation instructions below describe the existing upstream-maintained feature set, not an enabled cloud archive.
+
+
 [![GitHub Release][releases-shield]][releases]
 [![License][license-shield]](LICENSE)
 ![Project Maintenance][maintenance-shield]
