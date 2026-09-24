@@ -161,6 +161,8 @@ class JsonTransport:
 
 @dataclass(frozen=True, slots=True)
 class IndexTraversal:
+    """Evidence from a bounded index traversal, not a vendor snapshot."""
+
     sessions: tuple[SessionIndex, ...]
     pages: tuple[IndexPage, ...]
     page_digests: tuple[str, ...]
