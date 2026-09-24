@@ -9,16 +9,30 @@ import uuid
 import pytest
 
 from custom_components.combustion.cloud.firestore import (
-    associated_probes, firestore_document, firestore_value, probe_status,
+    associated_probes,
+    firestore_document,
+    firestore_value,
+    probe_status,
     user_document_key,
 )
 from custom_components.combustion.cloud.models import (
-    CloudBoundsError, CloudConflictError, CloudSchemaError,
-    bounded_chunks, exact_int, normalize_ranges, parse_index_page,
-    parse_sample_chunk, parse_sample_row, parse_session_meta, strict_json,
+    CloudBoundsError,
+    CloudConflictError,
+    CloudSchemaError,
+    bounded_chunks,
+    exact_int,
+    normalize_ranges,
+    parse_index_page,
+    parse_sample_chunk,
+    parse_sample_row,
+    parse_session_meta,
+    strict_json,
 )
 from custom_components.combustion.cloud.sessions import (
-    chunk_intervals, expected_count, missing_intervals, numeric_session_token,
+    chunk_intervals,
+    expected_count,
+    missing_intervals,
+    numeric_session_token,
 )
 
 
