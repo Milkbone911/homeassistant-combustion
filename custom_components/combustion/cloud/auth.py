@@ -53,6 +53,7 @@ class TokenManager:
         on_rotation: RotationHook | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
+        """Initialize one account; never perform I/O in the constructor."""
         if not api_key or not refresh_token or len(api_key) > 2048 or len(refresh_token) > 8192:
             raise CloudAuthError("Missing or oversized cloud credential")
         self._api_key = api_key
@@ -66,13 +67,16 @@ class TokenManager:
 
     @property
     def subject(self) -> str | None:
+        """Return the authenticated or expected subject, without credentials."""
         return self._subject
 
     @property
     def generation(self) -> int:
+        """Return the in-memory token refresh generation."""
         return self._snapshot.generation if self._snapshot is not None else 0
 
     async def token(self) -> AuthSnapshot:
+        """Reuse a fresh access token or perform one locked refresh."""
         snapshot = self._snapshot
         if snapshot is not None:
             # Avoid continuous refresh for unusually short token lifetimes.
