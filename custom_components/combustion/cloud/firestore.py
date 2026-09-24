@@ -5,7 +5,6 @@ intentionally differs from its float64 and missing-value fallbacks.
 """
 from __future__ import annotations
 
-import math
 import uuid
 from typing import Any, Mapping
 
@@ -45,7 +44,7 @@ def firestore_value(value: Any, *, depth: int = 0) -> Any:
         # Firestore REST wraps int64 in a decimal string; do not float-convert.
         return exact_int(content, "integerValue", allow_string=True, minimum=-(2**63))
     if kind == "doubleValue":
-        if type(content) not in (int, float) or not math.isfinite(content):
+        if type(content) not in (int, float) or not -1e308 < content < 1e308:
             raise CloudSchemaError("Invalid Firestore double")
         return float(content)
     if kind == "booleanValue":
