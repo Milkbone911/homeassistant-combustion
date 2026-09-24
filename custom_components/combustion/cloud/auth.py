@@ -29,6 +29,7 @@ class AuthSnapshot:
 
 
 def parse_refresh_response(data: Mapping[str, Any], prior_subject: str | None) -> tuple[str, str, str, int]:
+    """Reject missing token fields and cross-account refresh."""
     subject = required_str(data, "user_id")
     if prior_subject is not None and subject != prior_subject:
         raise CloudAuthError("Authenticated subject does not match linked account")
@@ -77,7 +78,6 @@ class TokenManager:
             # Avoid continuous refresh for unusually short token lifetimes.
             remaining = snapshot.expiry_monotonic - self._clock()
             if remaining > 0 and remaining > min(300, max(1, self._last_ttl / 4)):
-    """Reject missing token fields and cross-account refresh."""
                 return snapshot
         return await self.refresh()
 
