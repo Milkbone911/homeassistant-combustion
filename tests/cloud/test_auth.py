@@ -1,4 +1,6 @@
 """S1 isolated token lifecycle: no HA config persistence or vendor bootstrap."""
+# ruff: noqa: D103
+
 from __future__ import annotations
 
 import asyncio
