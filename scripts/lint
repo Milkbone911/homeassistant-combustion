@@ -4,4 +4,5 @@ set -e
 
 cd "$(dirname "$0")/.."
 
-ruff check . --fix
+# Lint must not rewrite the source tree; fixes belong in an explicit commit.
+ruff check .
