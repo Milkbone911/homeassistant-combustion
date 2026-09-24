@@ -12,7 +12,6 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-
 MAX_SIGNED_INT = 2**63 - 1
 MAX_JSON_DEPTH = 32
 MAX_JSON_NODES = 50_000
