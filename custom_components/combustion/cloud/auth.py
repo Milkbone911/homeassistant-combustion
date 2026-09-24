@@ -19,6 +19,8 @@ RotationHook = Callable[[str, str], Awaitable[None]]
 
 @dataclass(frozen=True, slots=True)
 class AuthSnapshot:
+    """An in-memory verified identity and token generation."""
+
     subject: str
     id_token: str = field(repr=False)
     refresh_token: str = field(repr=False)
@@ -75,6 +77,7 @@ class TokenManager:
             # Avoid continuous refresh for unusually short token lifetimes.
             remaining = snapshot.expiry_monotonic - self._clock()
             if remaining > 0 and remaining > min(300, max(1, self._last_ttl / 4)):
+    """Reject missing token fields and cross-account refresh."""
                 return snapshot
         return await self.refresh()
 
