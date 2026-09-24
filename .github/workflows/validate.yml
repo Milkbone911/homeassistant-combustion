@@ -44,8 +44,13 @@ jobs:
         uses: "actions/setup-python@v5"
         with:
           python-version: "3.14"
-      - name: Install requirements
-        run: python3 -m pip install poetry~=2.3 && poetry install
+      - name: Install locked requirements
+        run: |
+          python3 -m pip install 'poetry~=2.3'
+          python3 --version
+          poetry --version
+          poetry check --lock
+          poetry install
       - name: Run tests
         run: |
           poetry run pytest
@@ -55,3 +60,16 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           pytest-xml-coverage-path: ./test_results/cov_xml/coverage.xml
           junitxml-path: ./test_results/pytest.xml
+
+  card-js:
+    runs-on: "ubuntu-latest"
+    name: Card resolver (Node 22)
+    steps:
+      - name: Check out code from GitHub
+        uses: "actions/checkout@v4"
+      - name: Setup Node
+        uses: "actions/setup-node@v4"
+        with:
+          node-version: "22"
+      - name: Run bundled card resolver tests
+        run: node --test tests/js/*.test.mjs
