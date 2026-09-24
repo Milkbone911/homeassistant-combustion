@@ -28,5 +28,5 @@ jobs:
 
         - name: "Run"
           run: |
-          poetry run ruff check . --fix --diff || true
-          poetry run ./scripts/lint
+            poetry run ruff check . --fix --diff || true
+            poetry run ./scripts/lint
