@@ -78,6 +78,7 @@ class JsonTransport:
         sleep: _SLEEP = asyncio.sleep,
         jitter: Callable[[], float] = random.random,
     ) -> None:
+        """Initialize the bounded caller-owned request adapter."""
         if not 1 <= max_body <= MAX_BODY or not 1 <= attempts <= 4:
             raise CloudBoundsError("Invalid transport budget")
         self._session = session
@@ -92,6 +93,7 @@ class JsonTransport:
         data: str | None = None,
         refresh: bool = False,
     ) -> Any:
+        """Send a bounded JSON request without credential-bearing redirects."""
         _check_endpoint(url, method)
         if method not in ("GET", "POST"):
             raise CloudSchemaError("Unsupported request method")
@@ -180,6 +182,7 @@ class CombustionCloudClient:
         on_rotation: Callable[[str, str], Awaitable[None]] | None = None,
         transport: JsonTransport | None = None,
     ) -> None:
+        """Initialize the bounded caller-owned request adapter."""
         self._http = transport or JsonTransport(session)
 
         async def refresh(api_key_value: str, refresh_value: str) -> Mapping[str, Any]:
@@ -202,6 +205,7 @@ class CombustionCloudClient:
 
     @property
     def subject(self) -> str | None:
+        """Return the configured or authenticated source account subject."""
         return self._auth.subject
 
     async def _get(self, url: str) -> Any:
@@ -225,12 +229,14 @@ class CombustionCloudClient:
         raise CloudAuthError("Cloud authorization failed")
 
     async def probes(self) -> tuple[Probe, ...]:
+        """Read associated probe source locators from Firestore."""
         snapshot = await self._auth.token()
         key = user_document_key(snapshot.subject)
         path = f"/v1/projects/{PROJECT}/databases/(default)/documents/users/{key}"
         return associated_probes(await self._get(FIRESTORE + path))
 
     async def status(self, probe: Probe) -> ProbeStatus:
+        """Fetch current probe status independently of historical acquisition."""
         # Device keys are source locators, not operator-provided arbitrary URLs.
         key = quote(probe.device_key, safe="")
         path = f"/v1/projects/{PROJECT}/databases/(default)/documents/probes/{key}/probe_status/current"
@@ -248,6 +254,7 @@ class CombustionCloudClient:
         return result
 
     async def session_meta(self, serial: str, session_id: int) -> SessionMeta:
+        """Fetch and strictly validate one source session manifest."""
         await self._auth.token()
         params = self._source_params(serial, session_id)
         return parse_session_meta(await self._get(DATA_API + "/v1/session?" + urlencode(params)))
@@ -255,6 +262,7 @@ class CombustionCloudClient:
     async def sample_chunk(
         self, serial: str, session_id: int, start: int, end: int,
     ) -> tuple[SampleRow, ...]:
+        """Read one bounded sequence range; absence remains partial."""
         exact_int(start, "start")
         exact_int(end, "end")
         if end < start or end - start >= 1000:
