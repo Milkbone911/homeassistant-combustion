@@ -105,16 +105,16 @@ def strict_json(raw: bytes | str) -> Any:
 
 
 def object_value(value: Any, field: str) -> Mapping[str, Any]:
-    if not isinstance(value, dict):
     """Require a JSON object at a named protocol boundary."""
+    if not isinstance(value, dict):
         raise CloudSchemaError(f"{field} must be an object")
     return value
 
 
 def required_str(source: Mapping[str, Any], field: str) -> str:
+    """Require a bounded, nonempty source string."""
     value = source.get(field)
     if not isinstance(value, str) or not value.strip():
-    """Require a bounded, nonempty source string."""
         raise CloudSchemaError(f"Missing or invalid {field}")
     if len(value) > 2048:
         raise CloudBoundsError(f"{field} exceeds maximum length")
@@ -122,15 +122,15 @@ def required_str(source: Mapping[str, Any], field: str) -> str:
 
 
 def optional_str(source: Mapping[str, Any], field: str) -> str | None:
+    """Distinguish absent/null optional strings from valid strings."""
     if field not in source or source[field] is None:
         return None
     return required_str(source, field)
 
 
 def exact_int(value: Any, field: str, *, allow_string: bool = False, minimum: int = 0) -> int:
-    if allow_string and isinstance(value, str):
     """Validate integer semantics without bool or float coercion."""
-    """Distinguish absent/null optional strings from valid strings."""
+    if allow_string and isinstance(value, str):
         if not value or len(value) > 20 or (
             not value.isascii() or
             (value[0] == "-" and not value[1:].isdigit()) or
@@ -144,12 +144,14 @@ def exact_int(value: Any, field: str, *, allow_string: bool = False, minimum: in
 
 
 def optional_int(source: Mapping[str, Any], field: str, *, minimum: int = 0) -> int | None:
+    """Validate an optional exact integer."""
     if field not in source or source[field] is None:
         return None
     return exact_int(source[field], field, minimum=minimum)
 
 
 def optional_time(source: Mapping[str, Any], field: str) -> str | None:
+    """Validate timezone-qualified timestamps, retaining source text."""
     value = optional_str(source, field)
     if value is None:
         return None
@@ -158,8 +160,6 @@ def optional_time(source: Mapping[str, Any], field: str) -> str | None:
         if dt.tzinfo is None or dt.utcoffset() is None:
             raise ValueError("Naive timestamp")
     except (ValueError, OverflowError):
-    """Validate timezone-qualified timestamps, retaining source text."""
-    """Validate an optional exact integer."""
         raise CloudSchemaError(f"Invalid timestamp field {field}") from None
     return value
 
@@ -271,6 +271,7 @@ class SampleRow:
 
 
 def parse_session_index(item: Any) -> SessionIndex:
+    """Decode a source session record without physical identity guesses."""
     source = object_value(item, "session")
     raw_token = source.get("device_session_id")
     # Source tokens are opaque strings. JSON integer tokens are retained exactly.
@@ -294,6 +295,7 @@ def parse_session_index(item: Any) -> SessionIndex:
 
 
 def parse_index_page(data: Any, *, page: int, page_size: int = 100) -> IndexPage:
+    """Validate a bounded index page without asserting snapshot consistency."""
     source = object_value(data, "session index")
     items = source.get("sessions")
     if not isinstance(items, list) or len(items) > page_size:
@@ -313,6 +315,7 @@ def parse_index_page(data: Any, *, page: int, page_size: int = 100) -> IndexPage
 
 
 def parse_session_meta(data: Any) -> SessionMeta:
+    """Require the source manifest, including explicit empty ranges."""
     source = object_value(data, "session metadata")
     if "sequence_number_ranges" not in source:
         raise CloudSchemaError("Missing sequence_number_ranges")
@@ -324,6 +327,7 @@ def parse_session_meta(data: Any) -> SessionMeta:
 
 
 def parse_sample_row(data: Any) -> SampleRow:
+    """Preserve an identified source sample and qualify optional fields."""
     source = object_value(data, "sample row")
     if "sequence_number" not in source:
         raise CloudSchemaError("Missing sequence_number")
@@ -358,6 +362,7 @@ def parse_sample_row(data: Any) -> SampleRow:
 def parse_sample_chunk(
     data: Any, *, start: int, end: int,
 ) -> tuple[SampleRow, ...]:
+    """Decode one bounded chunk; missing rows remain explicitly missing."""
     exact_int(start, "start")
     exact_int(end, "end")
     if end < start or end - start >= 1000:
@@ -371,11 +376,6 @@ def parse_sample_chunk(
         raise CloudSchemaError("Invalid sample data mapping")
     rows: dict[int, SampleRow] = {}
     for item in entries.values():
-    """Decode one bounded chunk; missing rows remain explicitly missing."""
-    """Preserve an identified source sample and qualify optional fields."""
-    """Require the source manifest, including explicit empty ranges."""
-    """Validate a bounded index page without asserting snapshot consistency."""
-    """Decode a source session record without physical identity guesses."""
         row = parse_sample_row(item)
         if not start <= row.sequence <= end:
             raise CloudConflictError("Out-of-range sample sequence")
