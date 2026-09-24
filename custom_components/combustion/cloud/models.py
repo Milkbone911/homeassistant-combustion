@@ -106,6 +106,7 @@ def strict_json(raw: bytes | str) -> Any:
 
 def object_value(value: Any, field: str) -> Mapping[str, Any]:
     if not isinstance(value, dict):
+    """Require a JSON object at a named protocol boundary."""
         raise CloudSchemaError(f"{field} must be an object")
     return value
 
@@ -113,6 +114,7 @@ def object_value(value: Any, field: str) -> Mapping[str, Any]:
 def required_str(source: Mapping[str, Any], field: str) -> str:
     value = source.get(field)
     if not isinstance(value, str) or not value.strip():
+    """Require a bounded, nonempty source string."""
         raise CloudSchemaError(f"Missing or invalid {field}")
     if len(value) > 2048:
         raise CloudBoundsError(f"{field} exceeds maximum length")
@@ -127,6 +129,8 @@ def optional_str(source: Mapping[str, Any], field: str) -> str | None:
 
 def exact_int(value: Any, field: str, *, allow_string: bool = False, minimum: int = 0) -> int:
     if allow_string and isinstance(value, str):
+    """Validate integer semantics without bool or float coercion."""
+    """Distinguish absent/null optional strings from valid strings."""
         if not value or len(value) > 20 or (
             not value.isascii() or
             (value[0] == "-" and not value[1:].isdigit()) or
@@ -154,6 +158,8 @@ def optional_time(source: Mapping[str, Any], field: str) -> str | None:
         if dt.tzinfo is None or dt.utcoffset() is None:
             raise ValueError("Naive timestamp")
     except (ValueError, OverflowError):
+    """Validate timezone-qualified timestamps, retaining source text."""
+    """Validate an optional exact integer."""
         raise CloudSchemaError(f"Invalid timestamp field {field}") from None
     return value
 
@@ -204,18 +210,24 @@ def bounded_chunks(
 
 @dataclass(frozen=True, slots=True)
 class Probe:
+    """A cloud-associated probe's source locators."""
+
     serial: str
     device_key: str
 
 
 @dataclass(frozen=True, slots=True)
 class ProbeStatus:
+    """Observed Firestore current session and sample period."""
+
     session_id: int
     sample_period_ms: int
 
 
 @dataclass(frozen=True, slots=True)
 class SessionIndex:
+    """One observed index record, not a household cook."""
+
     source_session_token: str
     index_id: str | None
     serial: str | None
@@ -230,6 +242,8 @@ class SessionIndex:
 
 @dataclass(frozen=True, slots=True)
 class IndexPage:
+    """A bounded page of source session index records."""
+
     requested_page: int
     returned_page: int | None
     total_pages: int | None
@@ -238,6 +252,8 @@ class IndexPage:
 
 @dataclass(frozen=True, slots=True)
 class SessionMeta:
+    """A strictly validated session manifest."""
+
     started_at: str | None
     ranges: tuple[tuple[int, int], ...]
     raw: Mapping[str, Any]
@@ -245,6 +261,8 @@ class SessionMeta:
 
 @dataclass(frozen=True, slots=True)
 class SampleRow:
+    """An identified sample with independently qualified optional fields."""
+
     sequence: int
     sampled_at: str | None
     fields: Mapping[str, int | float | None]
@@ -353,6 +371,11 @@ def parse_sample_chunk(
         raise CloudSchemaError("Invalid sample data mapping")
     rows: dict[int, SampleRow] = {}
     for item in entries.values():
+    """Decode one bounded chunk; missing rows remain explicitly missing."""
+    """Preserve an identified source sample and qualify optional fields."""
+    """Require the source manifest, including explicit empty ranges."""
+    """Validate a bounded index page without asserting snapshot consistency."""
+    """Decode a source session record without physical identity guesses."""
         row = parse_sample_row(item)
         if not start <= row.sequence <= end:
             raise CloudConflictError("Out-of-range sample sequence")
