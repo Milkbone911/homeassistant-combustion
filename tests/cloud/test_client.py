@@ -1,5 +1,5 @@
 """Mock-transport cloud contract; synthetic responses only, never vendor credentials."""
-# ruff: noqa: D101, D102, D103, D107
+# ruff: noqa: D101, D102, D103, D105, D107
 
 from __future__ import annotations
 
@@ -104,7 +104,7 @@ async def test_probes_contract_and_fixed_https_destinations():
     assert post[0] == "POST" and urlsplit(post[1]).hostname == "securetoken.googleapis.com"
     assert "refresh_token=synthetic-refresh" in post[2]["data"]
     assert get[0] == "GET" and urlsplit(get[1]).hostname == "firestore.googleapis.com"
-    assert "Bearer synthetic-id" == get[2]["headers"]["Authorization"]
+    assert get[2]["headers"]["Authorization"] == "Bearer synthetic-id"
     assert get[2]["allow_redirects"] is False
 
 
@@ -272,7 +272,7 @@ async def test_failed_transport_retries_are_bounded_and_cancellation_propagates(
     sleeps = []
     async def sleep(delay):
         sleeps.append(delay)
-    session = FakeSession(asyncio.TimeoutError(), asyncio.TimeoutError())
+    session = FakeSession(TimeoutError(), TimeoutError())
     with pytest.raises(CloudTransportError):
         await JsonTransport(session, attempts=2, sleep=sleep, jitter=lambda: 0).request_json(
             "GET", "https://data-api.combustion.inc/v1/session",
