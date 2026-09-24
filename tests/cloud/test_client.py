@@ -1,4 +1,6 @@
 """Mock-transport cloud contract; synthetic responses only, never vendor credentials."""
+# ruff: noqa: D101, D102, D103, D107
+
 from __future__ import annotations
 
 import asyncio
@@ -8,7 +10,7 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 
 from custom_components.combustion.cloud.client import (
-    CombustionCloudClient, JsonTransport, MAX_BODY,
+    CombustionCloudClient, JsonTransport,
 )
 from custom_components.combustion.cloud.models import (
     CloudAuthError, CloudBoundsError, CloudConflictError,
