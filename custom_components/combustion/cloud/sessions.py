@@ -4,7 +4,10 @@ from __future__ import annotations
 from collections.abc import Iterable, Iterator
 
 from .models import (
-    CloudBoundsError, CloudSchemaError, MAX_SIGNED_INT, exact_int,
+    MAX_SIGNED_INT,
+    CloudBoundsError,
+    CloudSchemaError,
+    exact_int,
     normalize_ranges,
 )
 
