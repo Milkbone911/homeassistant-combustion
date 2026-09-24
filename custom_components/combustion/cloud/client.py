@@ -6,12 +6,12 @@ injected aiohttp session and does not log URLs, bodies, identities or tokens.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
-from datetime import datetime, timezone
 import hashlib
 import json
 import random
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import quote, urlencode, urlsplit
 
@@ -20,7 +20,7 @@ import aiohttp
 from .auth import TokenManager
 from .firestore import associated_probes, probe_status, user_document_key
 from .models import (
-    CloudAuthError, CloudBoundsError, CloudConflictError, CloudError,
+    CloudAuthError, CloudBoundsError, CloudConflictError,
     CloudPermissionError, CloudRateLimitError, CloudSchemaError,
     CloudTransportError, CloudUnavailableError, IndexPage, Probe,
     ProbeStatus, SampleRow, SessionIndex, SessionMeta, exact_int,
