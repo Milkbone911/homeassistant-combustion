@@ -27,4 +27,6 @@ jobs:
           run: python3 -m pip install poetry~=2.3 && poetry install
 
         - name: "Run"
-          run: poetry run ./scripts/lint
+          run: |
+          poetry run ruff check . --fix --diff || true
+          poetry run ./scripts/lint
