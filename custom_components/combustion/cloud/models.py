@@ -7,9 +7,10 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Mapping
+from typing import Any
 
 
 MAX_SIGNED_INT = 2**63 - 1
@@ -193,6 +194,7 @@ def normalize_ranges(ranges: tuple[tuple[int, int], ...]) -> tuple[tuple[int, in
 def bounded_chunks(
     ranges: tuple[tuple[int, int], ...], *, size: int = 1000,
 ) -> tuple[tuple[int, int], ...]:
+    """Bound eager chunk plans; the archive uses the lazy S3 iterator."""
     if not 1 <= size <= 1000:
         raise CloudBoundsError("Invalid chunk size")
     # Callers pass one bounded work unit during S3. Avoid materializing
