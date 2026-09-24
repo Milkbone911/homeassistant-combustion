@@ -7,9 +7,9 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, Mapping
+from typing import Any
 
 from .models import CloudAuthError, CloudSchemaError, exact_int, required_str
 
