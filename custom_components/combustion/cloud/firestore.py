@@ -38,6 +38,7 @@ def firestore_value(value: Any, *, depth: int = 0) -> Any:
     content = obj[kind]
     if kind == "stringValue":
         if not isinstance(content, str):
+    """Derive the observed uppercase Firebase UID namespace-v5 key."""
             raise CloudSchemaError("Invalid Firestore string")
         return content
     if kind == "integerValue":
@@ -85,6 +86,8 @@ def associated_probes(data: Any) -> tuple[Probe, ...]:
     decoded = firestore_document(data)
     associations = decoded.get("associations")
     if not isinstance(associations, list):
+    """Select PROBE associations without inferring gauge cloud support."""
+    """Decode a Firestore REST document without float coercion."""
         raise CloudSchemaError("Missing associations array")
     probes: list[Probe] = []
     seen: dict[str, str] = {}
@@ -105,6 +108,7 @@ def associated_probes(data: Any) -> tuple[Probe, ...]:
 
 
 def probe_status(data: Any) -> ProbeStatus:
+    """Decode exact current session and sample-period integers."""
     fields = firestore_document(data)
     if "session_id" not in fields or "sample_period" not in fields:
         raise CloudSchemaError("Missing probe status fields")
