@@ -10,8 +10,13 @@ from collections.abc import Mapping
 from typing import Any
 
 from .models import (
-    CloudBoundsError, CloudSchemaError, Probe, ProbeStatus, exact_int,
-    object_value, required_str,
+    CloudBoundsError,
+    CloudSchemaError,
+    Probe,
+    ProbeStatus,
+    exact_int,
+    object_value,
+    required_str,
 )
 
 USER_KEY_NAMESPACE = uuid.UUID("c6639a3c-0b0a-4dd9-8cc1-046a2da8a5f1")
