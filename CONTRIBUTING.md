@@ -55,7 +55,8 @@ This project includes a [devcontainer](./.devcontainer) configuration for an eas
 Dependencies are managed via [Poetry](https://python-poetry.org). This will be managed for you automatically if using the dev container. If you wish to run outside of a dev container, you will need to install your dependencies manually:
 
 ```sh
-pip install poetry~=1.7
+pip install 'poetry~=2.3'
+poetry check --lock
 poetry install
 ```
 
@@ -66,14 +67,6 @@ Use `./scripts/test` to invoke the test runner. You must be within the virtual e
 poetry run ./scripts/test
 ```
 
-Alternatively:
-
-```sh
-poetry shell
-# you now have a shell within the virtual env
-./scripts/test
-```
-
 ### Linting
 Use `./scripts/lint` to invoke the project linter. You must be within the virtual environment where project dependencies are installed:
 
@@ -81,13 +74,7 @@ Use `./scripts/lint` to invoke the project linter. You must be within the virtua
 poetry run ./scripts/lint
 ```
 
-Alternatively:
-
-```sh
-poetry shell
-# you now have a shell within the virtual env
-./scripts/lint
-```
+The supported test environment is Python >=3.14.2,<3.15, with Home Assistant 2026.8.2 and the dependencies in `poetry.lock`. Run the bundled card resolver tests with `node --test tests/js/*.test.mjs` (CI uses Node 22). The Cook Library S0/S1 scope and live-installation evidence gates are documented in [`docs/cook-library/S0_BASELINE.md`](docs/cook-library/S0_BASELINE.md).
 
 ## License
 
