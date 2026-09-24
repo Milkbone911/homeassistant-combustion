@@ -7,7 +7,8 @@ import asyncio
 import pytest
 
 from custom_components.combustion.cloud.auth import (
-    TokenManager, parse_refresh_response,
+    TokenManager,
+    parse_refresh_response,
 )
 from custom_components.combustion.cloud.models import CloudAuthError, CloudSchemaError
 
