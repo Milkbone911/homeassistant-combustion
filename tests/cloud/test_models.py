@@ -46,8 +46,14 @@ def doc(**fields):
 
 def test_uuid5_user_key_matches_independent_stdlib_algorithm():
     namespace = uuid.UUID("c6639a3c-0b0a-4dd9-8cc1-046a2da8a5f1")
-    for uid in ("synthetic-account", "case-Sensitive", "ü-nicode"):
-        assert user_document_key(uid) == str(uuid.uuid5(namespace, uid)).upper()
+    vectors = {
+        "synthetic-account": "335134B7-8472-5B3A-9ED3-2F75452DA033",
+        "case-Sensitive": "FE5B278D-730C-5EF7-85EA-D3CF3D6FE834",
+        "ü-nicode": "C578EFB6-B9CD-5660-9119-AED2B2ED65CD",
+    }
+    for uid, expected in vectors.items():
+        assert user_document_key(uid) == expected
+        assert str(uuid.uuid5(namespace, uid)).upper() == expected
     assert user_document_key("User") != user_document_key("user")
 
 
