@@ -21,6 +21,7 @@ VALUE_TYPES = frozenset((
 
 
 def user_document_key(firebase_subject: str) -> str:
+    """Derive the observed uppercase Firebase UID namespace-v5 key."""
     if not isinstance(firebase_subject, str) or not firebase_subject or len(firebase_subject) > 2048:
         raise CloudSchemaError("Invalid Firebase subject")
     return str(uuid.uuid5(USER_KEY_NAMESPACE, firebase_subject)).upper()
@@ -38,7 +39,6 @@ def firestore_value(value: Any, *, depth: int = 0) -> Any:
     content = obj[kind]
     if kind == "stringValue":
         if not isinstance(content, str):
-    """Derive the observed uppercase Firebase UID namespace-v5 key."""
             raise CloudSchemaError("Invalid Firestore string")
         return content
     if kind == "integerValue":
@@ -75,6 +75,7 @@ def firestore_value(value: Any, *, depth: int = 0) -> Any:
 
 
 def firestore_document(data: Any) -> Mapping[str, Any]:
+    """Decode a Firestore REST document without float coercion."""
     root = object_value(data, "Firestore document")
     fields = root.get("fields")
     if not isinstance(fields, dict) or len(fields) > 10_000:
@@ -83,11 +84,10 @@ def firestore_document(data: Any) -> Mapping[str, Any]:
 
 
 def associated_probes(data: Any) -> tuple[Probe, ...]:
+    """Select PROBE associations without inferring gauge cloud support."""
     decoded = firestore_document(data)
     associations = decoded.get("associations")
     if not isinstance(associations, list):
-    """Select PROBE associations without inferring gauge cloud support."""
-    """Decode a Firestore REST document without float coercion."""
         raise CloudSchemaError("Missing associations array")
     probes: list[Probe] = []
     seen: dict[str, str] = {}
