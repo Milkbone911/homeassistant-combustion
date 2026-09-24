@@ -6,7 +6,8 @@ intentionally differs from its float64 and missing-value fallbacks.
 from __future__ import annotations
 
 import uuid
-from typing import Any, Mapping
+from collections.abc import Mapping
+from typing import Any
 
 from .models import (
     CloudBoundsError, CloudSchemaError, Probe, ProbeStatus, exact_int,
