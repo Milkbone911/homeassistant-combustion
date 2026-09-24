@@ -5,10 +5,10 @@ imports, filesystem activity, or network activity belong in this module.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime
 import json
 import math
+from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Mapping
 
 
@@ -82,7 +82,7 @@ def strict_json(raw: bytes | str) -> Any:
         result = json.loads(
             raw, object_pairs_hook=_pairs_unique, parse_constant=_reject_constant,
         )
-    except (ValueError, UnicodeError, RecursionError) as err:
+    except (ValueError, UnicodeError, RecursionError):
         raise CloudSchemaError("Invalid JSON response") from None
     nodes = 0
 
@@ -323,7 +323,7 @@ def parse_sample_row(data: Any) -> SampleRow:
                 fields[name] = exact_int(value, name)
             except CloudSchemaError:
                 invalid.append(name)
-        elif type(value) in (float, int) and math.isfinite(value):
+        elif type(value) in (float, int) and -1e308 < value < 1e308:
             fields[name] = value
         else:
             invalid.append(name)
