@@ -55,12 +55,13 @@ jobs:
       - name: Run tests
         run: |
           poetry run pytest
-      - name: Pytest coverage comment
-        uses: MishaKav/pytest-coverage-comment@v1.1.51
+      - name: Upload pytest and coverage reports
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          pytest-xml-coverage-path: ./test_results/cov_xml/coverage.xml
-          junitxml-path: ./test_results/pytest.xml
+          name: pytest-results
+          path: test_results/
+          if-no-files-found: warn
 
   card-js:
     runs-on: "ubuntu-latest"
