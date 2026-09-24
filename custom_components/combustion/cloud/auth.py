@@ -6,9 +6,9 @@ in S1. A future HA adapter owns the protected refresh-credential callback.
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-import time
 from typing import Any, Mapping
 
 from .models import CloudAuthError, CloudSchemaError, exact_int, required_str
