@@ -11,7 +11,7 @@ import json
 import random
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import quote, urlencode, urlsplit
 
@@ -152,7 +152,7 @@ class JsonTransport:
                         return strict_json(bytes(body))
             except asyncio.CancelledError:
                 raise
-            except (aiohttp.ClientError, asyncio.TimeoutError):
+            except (aiohttp.ClientError, TimeoutError):
                 if attempt + 1 == self._attempts:
                     raise CloudTransportError("Cloud transport failure") from None
                 retry_delay = min(2**attempt, 8) + self._jitter()
@@ -218,7 +218,7 @@ class CombustionCloudClient:
                 "CI-AppVersion": "v3.2.4",
                 "CI-OSVersion": "35",
                 "CI-Locale": "en-US",
-                "CI-DateTime": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "CI-DateTime": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
             }
             try:
                 return await self._http.request_json("GET", url, headers=headers)
