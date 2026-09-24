@@ -13,6 +13,9 @@ COMPONENT = pathlib.Path(__file__).parent.parent / "custom_components" / "combus
 #   - bleak / bleak_retry_connector / home_assistant_bluetooth: installed by the
 #     `bluetooth` integration, which manifest.json depends on via bluetooth_adapters
 PROVIDED_BY_HA = {
+    # Core aiohttp is guaranteed by Home Assistant; cloud/client.py accepts
+    # a caller-owned session rather than installing or replacing HTTP stacks.
+    "aiohttp",
     "voluptuous",
     "bleak",
     "bleak_retry_connector",
