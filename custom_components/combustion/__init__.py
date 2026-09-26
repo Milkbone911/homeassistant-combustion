@@ -20,6 +20,7 @@ from custom_components.combustion.control_manager import ControlManager
 from custom_components.combustion.prediction_manager import PredictionManager
 from custom_components.combustion.probe_manager import ProbeManager
 
+from .cloud.ha import async_check_linked_account, cloud_linked
 from .const import (
     CONF_AVAILABILITY_TIMEOUT,
     CONF_ENABLE_ACTIVE_CONNECTION,
@@ -144,6 +145,18 @@ async def async_setup_entry(
     listener.async_init()
     prediction_manager.async_init()
     connection_manager.async_init()
+
+    # Optional cloud validation is deliberately background work: a provider
+    # outage, invalid token, or response-shape change must never make the
+    # established local BLE/GATT setup fail. Persistent auth failure starts
+    # Home Assistant's reauth flow instead of raising from async_setup_entry.
+    if cloud_linked(entry.data):
+        runtime.create_optional_task(
+            hass,
+            entry,
+            async_check_linked_account(hass, entry, runtime.cloud_health),
+            "combustion-cloud-link-check",
+        )
 
     # When a device stops advertising, no bluetooth callback fires to push the
     # entities to unavailable; re-notify periodically so availability updates.
