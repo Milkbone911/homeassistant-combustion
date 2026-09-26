@@ -14,6 +14,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
 from .bluetooth_listener import BluetoothListener
+from .cloud.ha import CloudLinkHealth
 from .connection_manager import ConnectionManager
 from .control_manager import ControlManager
 from .prediction_manager import PredictionManager
@@ -35,6 +36,7 @@ class CombustionRuntime:
     connection_manager: ConnectionManager
     prediction_manager: PredictionManager
     control_manager: ControlManager
+    cloud_health: CloudLinkHealth = field(default_factory=CloudLinkHealth)
     _optional_tasks: set[asyncio.Task[Any]] = field(
         default_factory=set, init=False, repr=False
     )
