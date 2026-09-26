@@ -14,9 +14,9 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
 from .bluetooth_listener import BluetoothListener
+from .cloud.ha import CloudLinkHealth
 from .connection_manager import ConnectionManager
 from .control_manager import ControlManager
-from .cloud.ha import CloudLinkHealth
 from .prediction_manager import PredictionManager
 from .probe_manager import ProbeManager
 
