@@ -121,18 +121,20 @@ def test_normal_instant_normal_keeps_normal_cache_age_and_tracks_current_mode():
 
     with patch(
         "custom_components.combustion.probe_manager.time.monotonic",
-        side_effect=[100.0, 100.0, 101.1, 101.1, 102.2, 102.2],
-    ):
+        return_value=100.0,
+    ) as monotonic:
         update(normal_1)
         assert manager.current_mode_name("abc123") == "normal"
         assert manager.probe_data("abc123").temperature_data == [30.0] * 8
 
+        monotonic.return_value = 101.1
         update(instant)
         assert manager.current_mode_name("abc123") == "instant_read"
         assert manager.instant_read_temperature("abc123") == 88.0
         # Invalid instant-mode T2-T8 never refresh the normal cache.
         assert manager.probe_data("abc123").temperature_data == [30.0] * 8
 
+        monotonic.return_value = 102.2
         update(normal_2)
         assert manager.current_mode_name("abc123") == "normal"
         assert manager.probe_data("abc123").temperature_data == [40.0] * 8
