@@ -30,6 +30,10 @@ from ..const import (
 )
 
 
+class CloudLinkAccountMismatch(CloudAuthError):
+    """Validated credentials belong to a different Firebase subject."""
+
+
 class CloudLinkStatus(StrEnum):
     """Bounded optional-cloud health states exposed to later diagnostics."""
 
@@ -96,13 +100,17 @@ async def async_validate_cloud_link(
         session=async_get_clientsession(hass),
         api_key=api_key,
         refresh_token=refresh_token,
-        expected_subject=expected_subject,
+        expected_subject=None,
         on_rotation=_capture_rotation,
     )
     probes = await client.probes()
     subject = client.subject
     if subject is None:
         raise CloudAuthError("Cloud account did not return an authenticated subject")
+    if expected_subject is not None and subject != expected_subject:
+        raise CloudLinkAccountMismatch(
+            "Authenticated subject does not match linked account"
+        )
     return CloudLinkValidation(
         subject=subject,
         refresh_token=persisted_refresh,
