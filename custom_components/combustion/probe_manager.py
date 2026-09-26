@@ -253,7 +253,7 @@ class ProbeManager:
         return value
 
     def current_mode_name(self, serial_number: str) -> str | None:
-        """Current selected probe mode, independent of cached normal data."""
+        """Return the current selected probe mode independent of cached normal data."""
         return self._current_mode_name.get(serial_number)
 
     def latest_device_data(self, serial_number: str):
@@ -284,5 +284,5 @@ class ProbeManager:
         return _remove_listener
 
     def probe_data(self, serial_number: str):
-        """Normal/live device data for provided serial number."""
+        """Return normal/live device data for the provided serial number."""
         return self.data[serial_number]
