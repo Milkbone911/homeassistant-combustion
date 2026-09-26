@@ -184,6 +184,11 @@ class PredictionManager:
                 handle = self._expiry_handles.pop(serial, None)
                 if handle is not None:
                     handle.cancel()
+                # Disconnect is a hard current-fitness boundary. Retain the
+                # parsed value in data for future historical capture, but a
+                # reconnect must receive a new status notification before the
+                # prediction can become current again.
+                self._last_received.pop(serial, None)
         self._notify_listeners()
 
     def _on_status(self, serial: str, data: bytes) -> None:
