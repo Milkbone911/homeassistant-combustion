@@ -132,14 +132,20 @@ async def test_reconfigure_local_only_entry_links_cloud_without_second_entry(
     assert result["type"] is FlowResultType.FORM
     assert result["step_id"] == "cloud_link"
 
-    with patch(
-        "custom_components.combustion.config_flow.async_validate_cloud_link",
-        AsyncMock(return_value=VALID),
+    with (
+        patch(
+            "custom_components.combustion.config_flow.async_validate_cloud_link",
+            AsyncMock(return_value=VALID),
+        ),
+        patch.object(
+            hass.config_entries, "async_reload", AsyncMock(return_value=True)
+        ) as reload_entry,
     ):
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"], user_input=CREDS
         )
 
+    reload_entry.assert_awaited_once_with(entry.entry_id)
     assert result["type"] is FlowResultType.ABORT
     assert len(hass.config_entries.async_entries(DOMAIN)) == 1
     assert entry.data["devices"] == [{"address": "AA:BB"}]
@@ -179,13 +185,19 @@ async def test_automatic_reauth_requires_same_subject_and_preserves_generation(
     assert entry.data[CONF_CLOUD_REFRESH_TOKEN] == "old-refresh-token"
     assert entry.data[CONF_CLOUD_LINK_GENERATION] == 7
 
-    with patch(
-        "custom_components.combustion.config_flow.async_validate_cloud_link",
-        AsyncMock(return_value=VALID),
+    with (
+        patch(
+            "custom_components.combustion.config_flow.async_validate_cloud_link",
+            AsyncMock(return_value=VALID),
+        ),
+        patch.object(
+            hass.config_entries, "async_reload", AsyncMock(return_value=True)
+        ) as reload_entry,
     ):
         success = await hass.config_entries.flow.async_configure(
             mismatch["flow_id"], user_input=CREDS
         )
+    reload_entry.assert_awaited_once_with(entry.entry_id)
     assert success["type"] is FlowResultType.ABORT
     assert entry.data[CONF_CLOUD_REFRESH_TOKEN] == VALID.refresh_token
     assert entry.data[CONF_CLOUD_SUBJECT] == VALID.subject
@@ -234,14 +246,20 @@ async def test_explicit_replacement_requires_different_subject_and_advances_gene
         refresh_token="replacement-refresh",
         probe_count=1,
     )
-    with patch(
-        "custom_components.combustion.config_flow.async_validate_cloud_link",
-        AsyncMock(return_value=replacement),
+    with (
+        patch(
+            "custom_components.combustion.config_flow.async_validate_cloud_link",
+            AsyncMock(return_value=replacement),
+        ),
+        patch.object(
+            hass.config_entries, "async_reload", AsyncMock(return_value=True)
+        ) as reload_entry,
     ):
         success = await hass.config_entries.flow.async_configure(
             same["flow_id"], user_input=CREDS
         )
 
+    reload_entry.assert_awaited_once_with(entry.entry_id)
     assert success["type"] is FlowResultType.ABORT
     assert entry.data[CONF_CLOUD_SUBJECT] == "replacement-subject"
     assert entry.data[CONF_CLOUD_REFRESH_TOKEN] == "replacement-refresh"
