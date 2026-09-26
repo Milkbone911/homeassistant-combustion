@@ -91,10 +91,12 @@ async def test_user_step_finds_discovered_device(hass: HomeAssistant):
     assert result["type"] is FlowResultType.FORM
 
 
-async def test_user_step_aborts_with_nothing_in_range(hass: HomeAssistant):
-    """The manual (user) flow should abort cleanly when nothing is in range."""
+async def test_user_step_offers_cloud_link_with_nothing_in_range(
+    hass: HomeAssistant,
+):
+    """Sleeping hardware should fall through to optional cloud credential linking."""
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": config_entries.SOURCE_USER}
     )
-    assert result["type"] is FlowResultType.ABORT
-    assert result["reason"] == "no_devices_found"
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "cloud_link"

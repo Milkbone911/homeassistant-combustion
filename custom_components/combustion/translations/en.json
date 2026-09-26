@@ -3,15 +3,73 @@
         "step": {
             "confirm": {
                 "description": "Do you want to set up {name}?"
+            },
+            "cloud_link": {
+                "title": "Link MeatNet Cloud credentials",
+                "description": "Experimental unofficial cloud access. Enter a Firebase Web API key and refresh token obtained through an operator-controlled bootstrap. These credentials are stored in the Home Assistant config entry; Home Assistant configuration/backups are not application-level encrypted credential storage.",
+                "data": {
+                    "cloud_api_key": "Firebase Web API key",
+                    "cloud_refresh_token": "Firebase refresh token"
+                },
+                "data_description": {
+                    "cloud_api_key": "App-public Firebase Web API key used by the Combustion app. Do not publish it in this repository or chat transcripts.",
+                    "cloud_refresh_token": "Private refresh credential for your MeatNet Cloud account. Do not paste it into issues, logs, or chat."
+                }
+            },
+            "reconfigure": {
+                "title": "Manage MeatNet Cloud link",
+                "description": "Manage the optional cloud account linked to this Combustion Meatnet.",
+                "menu_options": {
+                    "cloud_reauth": "Update credentials for the same account",
+                    "cloud_replace": "Replace with a different account",
+                    "cloud_unlink": "Unlink cloud credentials"
+                }
+            },
+            "cloud_reauth": {
+                "title": "Update MeatNet Cloud credentials",
+                "description": "Enter new credentials for the same Firebase account. A different account is rejected; use Replace account instead.",
+                "data": {
+                    "cloud_api_key": "Firebase Web API key",
+                    "cloud_refresh_token": "Firebase refresh token"
+                }
+            },
+            "reauth_confirm": {
+                "title": "Reauthenticate MeatNet Cloud",
+                "description": "Cloud authorization failed. Enter valid credentials for the same linked Firebase account. Local Bluetooth operation remains independent.",
+                "data": {
+                    "cloud_api_key": "Firebase Web API key",
+                    "cloud_refresh_token": "Firebase refresh token"
+                }
+            },
+            "cloud_replace": {
+                "title": "Replace MeatNet Cloud account",
+                "description": "Link a different Firebase account. This advances the account-link generation so delayed work from the old account cannot be attributed to the new one.",
+                "data": {
+                    "cloud_api_key": "Firebase Web API key",
+                    "cloud_refresh_token": "Firebase refresh token"
+                }
+            },
+            "cloud_unlink": {
+                "title": "Unlink MeatNet Cloud",
+                "description": "Remove locally stored cloud credentials and stop active cloud work. This does not delete vendor data or claim to revoke the credential at the provider."
             }
         },
         "abort": {
             "not_supported": "This Combustion device does not broadcast usable data.",
             "already_configured": "The Combustion Meatnet is already configured.",
-            "no_devices_found": "No Combustion devices found. Turn on a probe, gauge, booster or display within Bluetooth range and try again."
+            "no_devices_found": "No Combustion devices found. Turn on a probe, gauge, booster or display within Bluetooth range and try again.",
+            "cloud_not_linked": "No MeatNet Cloud account is linked.",
+            "reauth_successful": "[%key:common::config_flow::abort::reauth_successful%]",
+            "reconfigure_successful": "[%key:common::config_flow::abort::reconfigure_successful%]"
         },
         "error": {
-            "unknown": "Unknown error occurred."
+            "unknown": "Unknown error occurred.",
+            "invalid_auth": "Cloud credentials were rejected.",
+            "wrong_account": "These credentials belong to a different MeatNet Cloud account.",
+            "cannot_connect": "Could not reach the cloud service.",
+            "cloud_permission": "The cloud account authenticated but access was denied.",
+            "cloud_unsupported": "The cloud response did not match the currently qualified unofficial protocol.",
+            "same_account": "This is the currently linked account. Use Update credentials instead."
         }
     },
     "options": {
