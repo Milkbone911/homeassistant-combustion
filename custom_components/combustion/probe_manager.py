@@ -137,7 +137,10 @@ class ProbeManager:
             """Handle one parsed HA-delivered Combustion observation."""
             device_data = observation.device_data
             serial = device_data.serial_number
-            now = observation.received_at_monotonic
+            # Live selection/throttle state keeps its established local clock;
+            # the envelope's earlier receipt timestamp is preserved separately
+            # for future archival provenance.
+            now = time.monotonic()
 
             # Preserve the historical availability behavior: even a repeated
             # copy rejected by direct-source preference proves that the probe
