@@ -33,6 +33,16 @@ VALID = CloudLinkValidation(
 )
 
 
+@pytest.fixture(autouse=True)
+def _prevent_runtime_cloud_network():
+    """Flow tests validate config semantics, never startup network behavior."""
+    with patch(
+        "custom_components.combustion.async_check_linked_account",
+        AsyncMock(),
+    ):
+        yield
+
+
 def _linked_entry(*, generation: int = 3) -> MockConfigEntry:
     return MockConfigEntry(
         domain=DOMAIN,
