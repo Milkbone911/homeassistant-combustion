@@ -34,6 +34,10 @@ class CloudLinkAccountMismatch(CloudAuthError):
     """Validated credentials belong to a different Firebase subject."""
 
 
+class CloudLinkChangedError(CloudAuthError):
+    """An awaited request belongs to a superseded account-link generation."""
+
+
 class CloudLinkStatus(StrEnum):
     """Bounded optional-cloud health states exposed to later diagnostics."""
 
@@ -145,7 +149,7 @@ async def async_check_linked_account(
             int(current.get(CONF_CLOUD_LINK_GENERATION, 0)) != generation
             or current.get(CONF_CLOUD_SUBJECT) != expected_subject
         ):
-            raise CloudAuthError("Cloud link changed during token refresh")
+            raise CloudLinkChangedError("Cloud link changed during token refresh")
         if current.get(CONF_CLOUD_REFRESH_TOKEN) == new:
             return
         # S2a intentionally removed the entry update listener: routine token
@@ -164,6 +168,10 @@ async def async_check_linked_account(
             on_rotation=_persist_rotation,
         )
         probes = await client.probes()
+    except CloudLinkChangedError:
+        # Replacement/unlink won the race. The old generation must not start
+        # reauth or publish health into the new account's runtime.
+        return
     except CloudAuthError:
         health.status = CloudLinkStatus.REAUTH_REQUIRED
         health.error_category = "auth"
