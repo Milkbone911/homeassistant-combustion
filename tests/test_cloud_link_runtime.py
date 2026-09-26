@@ -50,7 +50,7 @@ async def test_linked_startup_keeps_local_setup_independent_of_cloud_check(
         health.error_category = "transport"
 
     with patch(
-        "custom_components.combustion.__init__.async_check_linked_account",
+        "custom_components.combustion.async_check_linked_account",
         side_effect=fake_check,
     ):
         assert await hass.config_entries.async_setup(entry.entry_id)
@@ -71,7 +71,7 @@ async def test_rotation_persists_without_reloading_ble_runtime(
     entry.add_to_hass(hass)
 
     with patch(
-        "custom_components.combustion.__init__.async_check_linked_account",
+        "custom_components.combustion.async_check_linked_account",
         AsyncMock(),
     ):
         assert await hass.config_entries.async_setup(entry.entry_id)
@@ -115,7 +115,7 @@ async def test_auth_failure_requests_reauth_without_unloading_local_runtime(
     entry.add_to_hass(hass)
 
     with patch(
-        "custom_components.combustion.__init__.async_check_linked_account",
+        "custom_components.combustion.async_check_linked_account",
         AsyncMock(),
     ):
         assert await hass.config_entries.async_setup(entry.entry_id)
