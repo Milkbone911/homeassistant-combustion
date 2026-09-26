@@ -86,7 +86,7 @@ def _cloud_error_key(err: Exception) -> str:
         return "cloud_permission"
     if isinstance(err, CloudTransportError):
         return "cannot_connect"
-    if isinstance(err, (CloudSchemaError, CloudBoundsError, CloudConflictError)):
+    if isinstance(err, CloudSchemaError | CloudBoundsError | CloudConflictError):
         return "cloud_unsupported"
     return "unknown"
 
