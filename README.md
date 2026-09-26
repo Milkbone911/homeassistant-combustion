@@ -2,7 +2,7 @@
 
 Integrate [Combustion](https://combustion.inc) predictive probes and gauges into Home Assistant.
 
-> **Milkbone911 fork — Cook Library development:** The optional cloud/history/cook extension is **not implemented or released** in this baseline. For the S0 source pin, supported test environment and gated S1 development scope, see [Cook Library S0 baseline](docs/cook-library/S0_BASELINE.md) and [S1 handoff](docs/cook-library/S1_HANDOFF.md). The BLE installation instructions below describe the existing upstream-maintained feature set, not an enabled cloud archive.
+> **Milkbone911 fork — Cook Library development:** S2b optional MeatNet Cloud account linking is now present on `main` for controlled validation. Archive/history persistence and cook-library features are **not yet implemented or released**. See [Cook Library S0 baseline](docs/cook-library/S0_BASELINE.md), [S1 handoff](docs/cook-library/S1_HANDOFF.md), and [S2b account-link boundary](docs/cook-library/S2B_ACCOUNT_LINK.md).
 
 
 [![GitHub Release][releases-shield]][releases]
@@ -46,8 +46,8 @@ New features:
 ### HACS (recommended)
 
 1. In HACS, open the three-dot menu and choose **Custom repositories**.
-1. Add `https://github.com/raww/homeassistant-combustion` with category **Integration**.
-1. Install **Combustion** from HACS.
+1. Add `https://github.com/Milkbone911/homeassistant-combustion` with category **Integration**.
+1. Install **Combustion** from HACS. This development fork installs directly from the repository's `main` branch; it does not require a GitHub Release ZIP.
 1. Restart Home Assistant.
 1. Ensure you have a Combustion device turned on and within Bluetooth range of Home Assistant (or a Bluetooth proxy).
 1. In the HA UI go to "Configuration" -> "Integrations" to see your discovered Combustion device.
