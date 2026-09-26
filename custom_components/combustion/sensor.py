@@ -231,18 +231,14 @@ class CombustionModeSensor(CombustionEntity, SensorEntity):
 
     @property
     def native_value(self) -> str | None:
-        """Return the probe mode."""
-        try:
-            return self.probe_manager.probe_data(self.device_serial_number).mode_name
-        except Exception as ex:
-            _LOGGER.debug("Error getting mode for native_value: %s", ex)
-            return None
+        """Return the current selected probe mode."""
+        return self.probe_manager.current_mode_name(self.device_serial_number)
 
     @property
     def extra_state_attributes(self) -> Mapping[str, Any] | None:
         """Probe identity and data-source attributes."""
         try:
-            data = self.probe_manager.probe_data(self.device_serial_number)
+            data = self.probe_manager.latest_device_data(self.device_serial_number)
             return {
                 'probe_id': data.probe_id,
                 'color': data.color_name,
