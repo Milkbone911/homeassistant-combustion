@@ -105,6 +105,39 @@ async def test_first_discovery_instant_read_never_seeds_normal_temperatures(
     assert hass.states.get(mode_id).state == "normal"
 
 
+def test_normal_instant_normal_keeps_normal_cache_age_and_tracks_current_mode():
+    """Instant mode changes current mode without refreshing normal temperature data."""
+    manager = ProbeManager(bt_listener=None)
+    manager.init_sensor_platform(lambda _manager, _data: None)
+    manager.init_binary_sensor_platform(lambda _manager, _data: None)
+    update = manager.create_update_callback()
+
+    normal_1 = _fake_probe_data("PROBE", mode=ProbeMode.normal, tag="normal-1")
+    normal_1.temperature_data = [30.0] * 8
+    instant = _fake_probe_data("PROBE", mode=ProbeMode.instantRead, tag="instant")
+    instant.temperature_data = [88.0] + [999.0] * 7
+    normal_2 = _fake_probe_data("PROBE", mode=ProbeMode.normal, tag="normal-2")
+    normal_2.temperature_data = [40.0] * 8
+
+    with patch(
+        "custom_components.combustion.probe_manager.time.monotonic",
+        side_effect=[100.0, 100.0, 101.1, 101.1, 102.2, 102.2],
+    ):
+        update(normal_1)
+        assert manager.current_mode_name("abc123") == "normal"
+        assert manager.probe_data("abc123").temperature_data == [30.0] * 8
+
+        update(instant)
+        assert manager.current_mode_name("abc123") == "instant_read"
+        assert manager.instant_read_temperature("abc123") == 88.0
+        # Invalid instant-mode T2-T8 never refresh the normal cache.
+        assert manager.probe_data("abc123").temperature_data == [30.0] * 8
+
+        update(normal_2)
+        assert manager.current_mode_name("abc123") == "normal"
+        assert manager.probe_data("abc123").temperature_data == [40.0] * 8
+
+
 def _fake_probe_data(device_type: str, *, mode=ProbeMode.normal, tag: str = ""):
     return SimpleNamespace(
         serial_number="abc123",
@@ -329,6 +362,15 @@ def test_prediction_invalidates_immediately_on_disconnect_but_retains_raw_value(
 
     assert manager.prediction("abc123") is None
     assert manager.data["abc123"].seconds_remaining == 1230
+
+    # A quick reconnect is not evidence that the old ETA became current again.
+    connection.connected.add("abc123")
+    connection.fire_connection_change()
+    assert manager.prediction("abc123") is None
+
+    # Only a fresh Probe Status notification can restore current fitness.
+    connection.subscriptions[PROBE_STATUS_CHAR]("abc123", _prediction_status_packet())
+    assert manager.prediction("abc123") is not None
     manager.async_unload()
 
 
