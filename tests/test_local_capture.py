@@ -40,7 +40,11 @@ class _FakeEntry:
         coro,
         name: str,
     ) -> asyncio.Task:
-        return asyncio.create_task(coro, name=name)
+        """Fail if capture regresses to Home Assistant entry-owned cancellation."""
+        coro.close()
+        raise AssertionError(
+            "Local capture writer must not be an entry-owned background task"
+        )
 
 
 class _FakeObservationManager:
