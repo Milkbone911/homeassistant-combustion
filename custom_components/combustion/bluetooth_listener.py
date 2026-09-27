@@ -175,7 +175,12 @@ class BluetoothListener:
             if age >= 0:
                 upstream_age_seconds = age
 
-        payload = service_info.manufacturer_data.get(BT_MANUFACTURER_ID)
+        manufacturer_data = getattr(service_info, "manufacturer_data", None)
+        payload = (
+            manufacturer_data.get(BT_MANUFACTURER_ID)
+            if isinstance(manufacturer_data, dict)
+            else None
+        )
         manufacturer_payload_hex = (
             bytes(payload).hex()
             if isinstance(payload, bytes | bytearray | memoryview)
