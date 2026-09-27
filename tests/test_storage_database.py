@@ -11,6 +11,10 @@ from pathlib import Path
 
 import pytest
 
+from custom_components.combustion.source_link import (
+    SourceLinkRepository,
+    canonical_probe_serial,
+)
 from custom_components.combustion.storage.database import (
     ArchiveBusyError,
     ArchiveDatabase,
@@ -564,3 +568,133 @@ def test_sqlite_wal_fix_qualification_is_conservative(
 ):
     """Unknown release lines are not silently declared WAL-safe."""
     assert sqlite_wal_fix_qualified(version) is expected
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("10014e68", "10014E68"),
+        ("0A1B2C3D", "0A1B2C3D"),
+        ("a1b2c3d", "0A1B2C3D"),
+        ("00000001", "00000001"),
+        ("", None),
+        ("0", None),
+        ("not-hex", None),
+        ("100000000", None),
+    ],
+)
+def test_s5_probe_serial_normalization(value: str, expected: str | None):
+    """Cloud/local serial formatting is normalized without fuzzy matching."""
+    assert canonical_probe_serial(value) == expected
+
+
+@pytest.mark.asyncio
+async def test_s5_exact_serial_link_is_durable_and_idempotent(tmp_path: Path):
+    """One exact physical serial links one cloud source to one local probe."""
+    db = ArchiveDatabase(tmp_path / "archive.sqlite3", require_qualified_wal=False)
+    await db.async_start(allow_create=True)
+
+    def seed(conn):
+        now = 1_790_000_000_000_000
+        conn.execute(
+            """
+            INSERT INTO accounts(
+                account_id,provider,project,subject_ref,created_at_us,archived
+            ) VALUES('acct','firebase','combustion-production-apps','subject',?,0)
+            """,
+            (now,),
+        )
+        conn.execute(
+            """
+            INSERT INTO source_devices(
+                source_device_id,account_id,source_kind,provider_type,raw_serial,
+                source_key,provider_locator,first_seen_us,last_seen_us
+            ) VALUES(
+                'cloud-src','acct','cloud_probe',1,'0A1B2C3D',
+                'cloud-probe:test','provider-locator',?,?
+            )
+            """,
+            (now, now),
+        )
+        conn.execute(
+            """
+            INSERT INTO local_sources(
+                local_source_id,subject_kind,raw_serial,first_seen_us,last_seen_us
+            ) VALUES('local-src','probe','a1b2c3d',?,?)
+            """,
+            (now, now),
+        )
+
+    await db.async_write(seed)
+    links = SourceLinkRepository(db)
+    first = await links.async_reconcile()
+    second = await links.async_reconcile()
+
+    assert first["linked"] == 1
+    assert first["unresolved"] == 0
+    assert first["ambiguous"] == 0
+    assert second["linked"] == 0
+    assert second["unchanged"] == 1
+
+    row = await db.async_read(
+        lambda conn: conn.execute(
+            """
+            SELECT canonical_serial,evidence_kind,evidence_json,
+                   ended_at_us,end_reason
+            FROM identity_links
+            """
+        ).fetchone()
+    )
+    assert row[0] == "0A1B2C3D"
+    assert row[1] == "exact_serial"
+    assert '"cloud_raw_serial":"0A1B2C3D"' in row[2]
+    assert '"local_raw_serial":"a1b2c3d"' in row[2]
+    assert row[3:] == (None, None)
+    assert (await links.async_counts())["active_links"] == 1
+    await db.async_stop()
+
+
+@pytest.mark.asyncio
+async def test_s5_unmatched_serial_is_not_linked(tmp_path: Path):
+    """No local exact serial evidence leaves the cloud source unresolved."""
+    db = ArchiveDatabase(tmp_path / "archive.sqlite3", require_qualified_wal=False)
+    await db.async_start(allow_create=True)
+
+    def seed(conn):
+        now = 1_790_000_000_000_000
+        conn.execute(
+            """
+            INSERT INTO accounts(
+                account_id,provider,project,subject_ref,created_at_us,archived
+            ) VALUES('acct','firebase','combustion-production-apps','subject',?,0)
+            """,
+            (now,),
+        )
+        conn.execute(
+            """
+            INSERT INTO source_devices(
+                source_device_id,account_id,source_kind,provider_type,raw_serial,
+                source_key,provider_locator,first_seen_us,last_seen_us
+            ) VALUES(
+                'cloud-src','acct','cloud_probe',1,'0A1B2C3D',
+                'cloud-probe:test','provider-locator',?,?
+            )
+            """,
+            (now, now),
+        )
+        conn.execute(
+            """
+            INSERT INTO local_sources(
+                local_source_id,subject_kind,raw_serial,first_seen_us,last_seen_us
+            ) VALUES('local-src','probe','10014e68',?,?)
+            """,
+            (now, now),
+        )
+
+    await db.async_write(seed)
+    links = SourceLinkRepository(db)
+    result = await links.async_reconcile()
+    assert result["linked"] == 0
+    assert result["unresolved"] == 1
+    assert (await links.async_counts())["active_links"] == 0
+    await db.async_stop()
