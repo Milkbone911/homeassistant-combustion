@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 
 import pytest
@@ -115,6 +116,8 @@ def _probe_observation(
         upstream_time=service_info.time,
         connectable=service_info.connectable,
         received_at_epoch=epoch,
+        upstream_age_seconds=max(0.0, monotonic - float(service_info.time)),
+        manufacturer_payload_hex=service_info.manufacturer_data[2503].hex(),
     )
 
 
@@ -142,17 +145,20 @@ async def test_regular_policy_keeps_latest_pending_point_on_clean_stop(
     rows = await database.async_read(
         lambda conn: conn.execute(
             """
-            SELECT capture_class,t1,received_at_us
+            SELECT capture_class,t1,received_at_us,raw_json
             FROM local_observations
             ORDER BY event_ordinal
             """
         ).fetchall()
     )
-    assert rows == [
+    assert [(row[0], row[1], row[2]) for row in rows] == [
         ("transition", 20.0, 1_000_000_000),
         ("regular", 21.0, 1_000_010_000),
         ("regular", 23.0, 1_000_030_000),
     ]
+    retained = json.loads(rows[0][3])
+    assert retained["payload"]["manufacturer_payload_hex"]
+    assert retained["payload"]["upstream_age_seconds"] == pytest.approx(100.0)
     assert health.coalesced_observations == 1
     assert health.dropped_observations == 0
     assert health.status is LocalCaptureStatus.STOPPED
@@ -460,4 +466,47 @@ async def test_entity_factory_failure_does_not_stop_archive_capture(
         ("regular", 31.0),
     ]
     assert health.committed_observations == 2
+    await database.async_stop()
+
+
+@pytest.mark.asyncio
+async def test_partial_startup_detaches_listener_and_marks_run_interrupted(
+    hass: HomeAssistant,
+    tmp_path: Path,
+):
+    """A startup seam failure cannot leave an archive listener without a writer."""
+    database = ArchiveDatabase(
+        tmp_path / "startup-failure" / "archive.sqlite3",
+        require_qualified_wal=False,
+    )
+    await database.async_start(allow_create=True)
+    repository = ArchiveRepository(database)
+    probes = _FakeObservationManager()
+
+    class FailingPredictionManager:
+        def add_observation_listener(self, _listener):
+            raise RuntimeError("synthetic prediction listener failure")
+
+    health = LocalCaptureHealth()
+    supervisor = LocalCaptureSupervisor(
+        hass,
+        _FakeEntry(),  # type: ignore[arg-type]
+        repository,
+        probes,  # type: ignore[arg-type]
+        FailingPredictionManager(),  # type: ignore[arg-type]
+        health,
+    )
+
+    with pytest.raises(RuntimeError, match="prediction listener failure"):
+        await supervisor.async_start()
+
+    assert not probes.listeners
+    assert health.status is LocalCaptureStatus.DEGRADED
+    assert health.last_error_category == "startup"
+    state = await database.async_read(
+        lambda conn: conn.execute(
+            "SELECT terminal_status FROM local_capture_runs"
+        ).fetchone()
+    )
+    assert state == ("interrupted",)
     await database.async_stop()
