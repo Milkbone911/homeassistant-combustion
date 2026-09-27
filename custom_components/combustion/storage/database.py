@@ -171,6 +171,7 @@ class ArchiveDatabase:
         self._commands: queue.Queue[_Command | object] = queue.Queue()
         self._thread: threading.Thread | None = None
         self._init_future: concurrent.futures.Future[ArchiveMetadata] | None = None
+        self._shutdown_future: concurrent.futures.Future[None] | None = None
         self._reader_pool: concurrent.futures.ThreadPoolExecutor | None = None
         self._accepting = False
         self._owns_path = False
@@ -214,6 +215,7 @@ class ArchiveDatabase:
 
         self._acquire_guard()
         self._init_future = concurrent.futures.Future()
+        self._shutdown_future = concurrent.futures.Future()
         self._thread = threading.Thread(
             target=self._writer_main,
             args=(allow_create,),
@@ -414,12 +416,22 @@ class ArchiveDatabase:
                 conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
             conn.close()
             conn = None
+            if (
+                self._shutdown_future is not None
+                and not self._shutdown_future.done()
+            ):
+                self._shutdown_future.set_result(None)
         except BaseException as err:
             if self._init_future is not None and not self._init_future.done():
                 self._init_future.set_exception(err)
             else:
                 self.health.status = ArchiveStatus.DEGRADED
                 self.health.error_category = "writer"
+                if (
+                    self._shutdown_future is not None
+                    and not self._shutdown_future.done()
+                ):
+                    self._shutdown_future.set_exception(err)
         finally:
             if conn is not None:
                 with suppress(sqlite3.Error):
@@ -544,6 +556,9 @@ class ArchiveDatabase:
             with suppress(sqlite3.Error):
                 source.close()
 
+        # Make the closed SQLite snapshot durable before hashing/blessing it.
+        _fsync_file(destination)
+
         digest = hashlib.sha256()
         with destination.open("rb") as handle:
             for chunk in iter(lambda: handle.read(1024 * 1024), b""):
@@ -595,13 +610,31 @@ class ArchiveDatabase:
         """Open a closed snapshot and verify hash/schema/integrity/count semantics."""
         database = Path(database)
         manifest = Path(manifest)
-        payload = json.loads(manifest.read_text())
+        try:
+            raw_manifest = manifest.read_bytes()
+            if len(raw_manifest) > 64 * 1024:
+                raise ArchiveError("Backup manifest is oversized")
+            payload = json.loads(raw_manifest)
+        except ArchiveError:
+            raise
+        except (OSError, ValueError, UnicodeError) as err:
+            raise ArchiveError("Backup manifest is unreadable") from err
+        if not isinstance(payload, dict):
+            raise ArchiveError("Backup manifest is invalid")
+
         digest = hashlib.sha256()
         with database.open("rb") as handle:
             for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                 digest.update(chunk)
         if digest.hexdigest() != payload.get("sha256"):
             raise ArchiveError("Backup hash mismatch")
+        try:
+            database_bytes = database.stat().st_size
+        except OSError as err:
+            raise ArchiveError("Backup database is unavailable") from err
+        if database_bytes != payload.get("database_bytes"):
+            raise ArchiveError("Backup database size mismatch")
+
         conn = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
         try:
             quick = conn.execute("PRAGMA quick_check").fetchone()
@@ -610,6 +643,14 @@ class ArchiveDatabase:
             metadata = read_metadata(conn)
             if metadata.archive_id != payload.get("archive_id"):
                 raise ArchiveError("Backup archive identity mismatch")
+            if metadata.schema_version != payload.get("schema_version"):
+                raise ArchiveError("Backup schema version mismatch")
+            if metadata.minimum_reader_version != payload.get(
+                "minimum_reader_version"
+            ):
+                raise ArchiveError("Backup minimum reader version mismatch")
+            if metadata.database_generation != payload.get("database_generation"):
+                raise ArchiveError("Backup database generation mismatch")
             counts = {
                 table: int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
                 for table in (
@@ -622,15 +663,21 @@ class ArchiveDatabase:
                     "sync_receipts",
                 )
             }
+            last_receipt = conn.execute(
+                "SELECT MAX(committed_at_us) FROM sync_receipts"
+            ).fetchone()[0]
         finally:
             conn.close()
         if counts != payload.get("counts"):
             raise ArchiveError("Backup semantic counts mismatch")
+        if last_receipt != payload.get("last_committed_receipt_us"):
+            raise ArchiveError("Backup receipt boundary mismatch")
         return {
             "archive_id": metadata.archive_id,
             "schema_version": metadata.schema_version,
             "database_generation": metadata.database_generation,
             "counts": counts,
+            "last_committed_receipt_us": last_receipt,
         }
 
     def stop_accepting(self) -> None:
@@ -657,10 +704,28 @@ class ArchiveDatabase:
                 )
         self._thread = None
 
+        shutdown_error: BaseException | None = None
+        shutdown_future = self._shutdown_future
+        if shutdown_future is not None and shutdown_future.done():
+            try:
+                shutdown_future.result()
+            except BaseException as err:  # writer owns the durability boundary
+                shutdown_error = err
+
         pool = self._reader_pool
         self._reader_pool = None
         if pool is not None:
             await asyncio.to_thread(pool.shutdown, True)
+
+        if shutdown_error is not None:
+            # The worker is gone, but its final checkpoint/close did not
+            # complete cleanly. Retain the process-local ownership fence so a
+            # reload cannot silently reopen uncertain archive state.
+            self.health.status = ArchiveStatus.DEGRADED
+            self.health.error_category = "shutdown_incomplete"
+            raise ArchiveShutdownIncomplete(
+                "Archive writer did not shut down cleanly; ownership remains fenced"
+            ) from shutdown_error
 
         self._stopped = True
         self._release_guard()

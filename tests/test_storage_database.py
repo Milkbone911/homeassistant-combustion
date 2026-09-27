@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 import threading
 from pathlib import Path
@@ -13,6 +14,8 @@ from custom_components.combustion.storage.database import (
     ArchiveDatabase,
     ArchiveError,
     ArchiveIdentityError,
+    ArchiveShutdownIncomplete,
+    ArchiveStatus,
     sqlite_wal_fix_qualified,
 )
 
@@ -172,6 +175,84 @@ async def test_consistent_backup_reopens_and_validates_semantics(tmp_path: Path)
     assert validated["schema_version"] == 1
 
     await db.async_stop()
+
+
+@pytest.mark.asyncio
+async def test_backup_validator_rejects_db_backed_manifest_tamper(tmp_path: Path):
+    """Manifest fields derived from the snapshot must agree with the snapshot."""
+    path = tmp_path / "combustion" / "archive.sqlite3"
+    db = ArchiveDatabase(
+        path,
+        require_qualified_wal=False,
+        application_fingerprint="test-fingerprint",
+    )
+    await db.async_start(allow_create=True)
+    destination = path.parent / "backups" / "archive-test.sqlite3"
+    result = await db.async_backup(destination)
+    manifest = Path(result["manifest"])
+    original = json.loads(manifest.read_text())
+
+    cases = (
+        ("database_bytes", int(original["database_bytes"]) + 1, "size"),
+        ("schema_version", 999, "schema"),
+        ("minimum_reader_version", 999, "reader"),
+        ("database_generation", 999, "generation"),
+        ("last_committed_receipt_us", 999, "receipt"),
+    )
+    for field, value, message in cases:
+        changed = {**original, field: value}
+        manifest.write_text(json.dumps(changed))
+        with pytest.raises(ArchiveError, match=message):
+            ArchiveDatabase.validate_backup_sync(destination, manifest)
+
+    manifest.write_text(json.dumps(original))
+    ArchiveDatabase.validate_backup_sync(destination, manifest)
+    await db.async_stop()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_checkpoint_failure_remains_fenced(
+    tmp_path: Path, monkeypatch
+):
+    """A failed final WAL checkpoint cannot be reported as a clean stop."""
+    real_connect = sqlite3.connect
+
+    class FailingCheckpointConnection:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        def execute(self, sql, *args):
+            if "wal_checkpoint(TRUNCATE)" in sql:
+                raise sqlite3.OperationalError("injected final checkpoint failure")
+            return self._inner.execute(sql, *args)
+
+    def connect(*args, **kwargs):
+        inner = real_connect(*args, **kwargs)
+        if kwargs.get("uri"):
+            return inner
+        return FailingCheckpointConnection(inner)
+
+    monkeypatch.setattr(
+        "custom_components.combustion.storage.database.sqlite3.connect",
+        connect,
+    )
+
+    path = tmp_path / "archive.sqlite3"
+    db = ArchiveDatabase(path, require_qualified_wal=False)
+    await db.async_start(allow_create=True)
+
+    with pytest.raises(ArchiveShutdownIncomplete, match="ownership remains fenced"):
+        await db.async_stop()
+
+    assert db.health.status is ArchiveStatus.DEGRADED
+    assert db.health.error_category == "shutdown_incomplete"
+
+    second = ArchiveDatabase(path, require_qualified_wal=False)
+    with pytest.raises(ArchiveBusyError):
+        await second.async_start(allow_create=False)
 
 
 def test_backup_hash_tamper_is_rejected(tmp_path: Path):
