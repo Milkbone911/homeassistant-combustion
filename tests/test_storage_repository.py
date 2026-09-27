@@ -20,7 +20,7 @@ from custom_components.combustion.storage.repository import (
     LocalObservationRecord,
     local_observation_identity,
 )
-from custom_components.combustion.storage.schema import utc_now_us
+from custom_components.combustion.storage.schema import ArchiveSchemaError, utc_now_us
 
 
 def _index(token: str = "123") -> SessionIndex:
@@ -664,6 +664,17 @@ async def test_local_observations_are_idempotent_and_source_separated(
         ).fetchone()[0]
     )
     assert terminal == "clean"
+
+    destination = db.path.parent / "backups" / "archive-s4.sqlite3"
+    result = await db.async_backup(destination)
+    validated = ArchiveDatabase.validate_backup_sync(
+        destination,
+        Path(result["manifest"]),
+    )
+    assert validated["counts"]["local_sources"] == 1
+    assert validated["counts"]["local_capture_runs"] == 1
+    assert validated["counts"]["local_observations"] == 3
+    assert validated["counts"]["local_capture_gaps"] == 1
     await db.async_stop()
 
 
@@ -696,7 +707,7 @@ async def test_local_observation_identity_conflict_is_rejected(tmp_path: Path):
     changed = LocalObservationRecord(payload={"t1": 101.0}, **base)
 
     assert await repo.async_commit_local_observations([first]) == 1
-    with pytest.raises(Exception, match="identity conflict"):
+    with pytest.raises(ArchiveSchemaError, match="identity conflict"):
         await repo.async_commit_local_observations([changed])
 
     assert (await repo.async_local_capture_counts())["observations"] == 1
