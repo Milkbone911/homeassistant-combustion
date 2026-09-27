@@ -5,9 +5,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-import voluptuous as vol
-
 import homeassistant.helpers.config_validation as cv
+import voluptuous as vol
 from homeassistant.components import websocket_api
 from homeassistant.components.websocket_api import (
     ERR_NOT_FOUND,
