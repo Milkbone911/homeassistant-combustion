@@ -389,7 +389,7 @@ class CombustionVirtualCoreSensor(BaseCombustionTemperatureSensor):
         try:
             (thermistor_id, _temp) = self.probe_manager.probe_data(self.device_serial_number).core_sensor
         except Exception as ex:
-            _LOGGER.warning("Error getting core_sensor id for extra_state_attributes: %s", ex)
+            _LOGGER.debug("Core sensor attributes not available yet: %s", ex)
             return {}
 
         return {
@@ -427,7 +427,7 @@ class CombustionVirtualAmbientSensor(BaseCombustionTemperatureSensor):
         try:
             (thermistor_id, _temp) = self.probe_manager.probe_data(self.device_serial_number).ambient_sensor
         except Exception as ex:
-            _LOGGER.warning("Error getting ambient_sensor id for extra_state_attributes: %s", ex)
+            _LOGGER.debug("Ambient sensor attributes not available yet: %s", ex)
             return {}
 
         return {
@@ -465,7 +465,7 @@ class CombustionVirtualSurfaceSensor(BaseCombustionTemperatureSensor):
         try:
             (thermistor_id, _temp) = self.probe_manager.probe_data(self.device_serial_number).surface_sensor
         except Exception as ex:
-            _LOGGER.warning("Error getting surface_sensor id for extra_state_attributes: %s", ex)
+            _LOGGER.debug("Surface sensor attributes not available yet: %s", ex)
             return {}
 
         return {
