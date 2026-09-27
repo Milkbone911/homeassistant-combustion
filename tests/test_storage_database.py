@@ -30,8 +30,8 @@ async def test_archive_create_reopen_and_identity_binding(tmp_path: Path):
     db = ArchiveDatabase(path, require_qualified_wal=False)
     metadata = await db.async_start(allow_create=True)
 
-    assert metadata.schema_version == 2
-    assert metadata.database_generation == 2
+    assert metadata.schema_version == 3
+    assert metadata.database_generation == 3
     assert db.binding_path.is_file()
     assert path.is_file()
     assert path.stat().st_mode & 0o777 == 0o600
@@ -51,10 +51,10 @@ async def test_archive_create_reopen_and_identity_binding(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_v1_archive_migrates_to_v2_without_changing_identity_or_cloud_rows(
+async def test_v1_archive_migrates_to_v3_without_changing_identity_or_cloud_rows(
     tmp_path: Path,
 ):
-    """S4 forward migration preserves an identity-qualified S3 archive."""
+    """S5 forward migrations preserve an identity-qualified S3 archive."""
     path = tmp_path / "combustion" / "archive.sqlite3"
     path.parent.mkdir(parents=True)
     archive_id = "11111111-2222-3333-4444-555555555555"
@@ -126,9 +126,9 @@ async def test_v1_archive_migrates_to_v2_without_changing_identity_or_cloud_rows
     migrated = await db.async_start(allow_create=False)
 
     assert migrated.archive_id == archive_id
-    assert migrated.schema_version == 2
-    assert migrated.minimum_reader_version == 2
-    assert migrated.database_generation == 2
+    assert migrated.schema_version == 3
+    assert migrated.minimum_reader_version == 3
+    assert migrated.database_generation == 3
     assert migrated.path_binding_hash == binding_hash
 
     preserved = await db.async_read(
@@ -143,13 +143,14 @@ async def test_v1_archive_migrates_to_v2_without_changing_identity_or_cloud_rows
                 "SELECT name FROM sqlite_master "
                 "WHERE type='table' AND name IN "
                 "('local_sources','local_capture_runs','local_observations',"
-                "'local_capture_gaps') ORDER BY name"
+                "'local_capture_gaps','identity_links') ORDER BY name"
             ).fetchall(),
         )
     )
     assert preserved[:3] == (1, 1, 1)
-    assert preserved[3] == [(1,), (2,)]
+    assert preserved[3] == [(1,), (2,), (3,)]
     assert preserved[4] == [
+        ("identity_links",),
         ("local_capture_gaps",),
         ("local_capture_runs",),
         ("local_observations",),
@@ -303,7 +304,7 @@ async def test_consistent_backup_reopens_and_validates_semantics(tmp_path: Path)
 
     validated = ArchiveDatabase.validate_backup_sync(destination, manifest)
     assert validated["archive_id"] == metadata.archive_id
-    assert validated["schema_version"] == 2
+    assert validated["schema_version"] == 3
 
     await db.async_stop()
 
