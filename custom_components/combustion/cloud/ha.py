@@ -230,7 +230,6 @@ async def async_check_linked_account(
 
     # Re-check generation after awaited I/O. A replaced/unlinked account must
     # never publish health for the stale account generation.
-    current = entry.data
     if not linked_account_matches(entry, generation, expected_subject):
         return
 
