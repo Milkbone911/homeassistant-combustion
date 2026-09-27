@@ -167,8 +167,18 @@ async def test_consistent_backup_reopens_and_validates_semantics(tmp_path: Path)
     result = await db.async_backup(destination)
 
     assert destination.is_file()
+    binding = Path(result["binding"])
     manifest = Path(result["manifest"])
+    assert binding.is_file()
     assert manifest.is_file()
+
+    binding_payload = json.loads(binding.read_text())
+    assert set(binding_payload) == {
+        "archive_id",
+        "binding_version",
+        "database_path",
+        "path_binding_hash",
+    }
 
     validated = ArchiveDatabase.validate_backup_sync(destination, manifest)
     assert validated["archive_id"] == metadata.archive_id
@@ -206,6 +216,14 @@ async def test_backup_validator_rejects_db_backed_manifest_tamper(tmp_path: Path
             ArchiveDatabase.validate_backup_sync(destination, manifest)
 
     manifest.write_text(json.dumps(original))
+    ArchiveDatabase.validate_backup_sync(destination, manifest)
+
+    binding = manifest.parent / original["binding_file"]
+    binding_bytes = binding.read_bytes()
+    binding.write_bytes(binding_bytes + b" ")
+    with pytest.raises(ArchiveError, match="binding hash"):
+        ArchiveDatabase.validate_backup_sync(destination, manifest)
+    binding.write_bytes(binding_bytes)
     ArchiveDatabase.validate_backup_sync(destination, manifest)
     await db.async_stop()
 

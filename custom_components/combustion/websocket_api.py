@@ -263,6 +263,7 @@ async def websocket_archive_backup(
         msg["id"],
         {
             "database_file": Path(result["database"]).name,
+            "binding_file": Path(result["binding"]).name,
             "manifest_file": Path(result["manifest"]).name,
             "created_at_us": result["created_at_us"],
             "sha256": result["sha256"],

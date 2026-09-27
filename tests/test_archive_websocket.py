@@ -82,6 +82,9 @@ async def test_archive_backup_websocket_uses_fixed_internal_directory(
             assert destination.suffix == ".sqlite3"
             return {
                 "database": str(destination),
+                "binding": str(
+                    destination.with_suffix(".sqlite3.binding.json")
+                ),
                 "manifest": str(
                     destination.with_suffix(".sqlite3.manifest.json")
                 ),
@@ -104,6 +107,8 @@ async def test_archive_backup_websocket_uses_fixed_internal_directory(
     assert response["success"] is True
     assert response["result"]["database_file"].startswith("archive-")
     assert "/" not in response["result"]["database_file"]
+    assert response["result"]["binding_file"].endswith(".binding.json")
+    assert "/" not in response["result"]["binding_file"]
     assert response["result"]["sha256"] == "abc"
 
 

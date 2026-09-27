@@ -511,8 +511,16 @@ class ArchiveDatabase:
         destination = Path(os.path.abspath(destination))
         if destination.parent != Path(os.path.abspath(backup_root)):
             raise ArchiveError("Backup destination is outside the archive backup directory")
-        if destination.exists():
-            raise ArchiveError("Backup destination already exists")
+
+        binding_copy = destination.with_suffix(
+            destination.suffix + ".binding.json"
+        )
+        manifest_path = destination.with_suffix(
+            destination.suffix + ".manifest.json"
+        )
+        for artifact in (destination, binding_copy, manifest_path):
+            if artifact.exists():
+                raise ArchiveError("Backup artifact already exists")
 
         source = sqlite3.connect(
             f"file:{self.path}?mode=ro",
@@ -556,37 +564,88 @@ class ArchiveDatabase:
             with suppress(sqlite3.Error):
                 source.close()
 
-        # Make the closed SQLite snapshot durable before hashing/blessing it.
-        _fsync_file(destination)
+        binding_tmp = binding_copy.with_suffix(binding_copy.suffix + ".tmp")
+        manifest_tmp = manifest_path.with_suffix(manifest_path.suffix + ".tmp")
+        try:
+            # Make the closed SQLite snapshot durable before hashing/blessing it.
+            _fsync_file(destination)
 
-        digest = hashlib.sha256()
-        with destination.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(chunk)
+            # A database-only copy is not restorable because the archive
+            # intentionally refuses to adopt an unbound database. Carry the
+            # non-secret identity binding as part of the recovery bundle.
+            self._validate_binding(metadata)
+            binding_payload = self._load_binding()
+            binding_blob = (
+                canonical_json(binding_payload, max_bytes=16 * 1024) + "\n"
+            ).encode()
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            fd = os.open(binding_tmp, flags, 0o600)
+            try:
+                with os.fdopen(fd, "wb") as handle:
+                    handle.write(binding_blob)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            except BaseException:
+                with suppress(OSError):
+                    binding_tmp.unlink()
+                raise
+            os.replace(binding_tmp, binding_copy)
+            _fsync_file(binding_copy)
 
-        created = utc_now_us()
-        manifest = {
-            "archive_id": metadata.archive_id,
-            "schema_version": metadata.schema_version,
-            "minimum_reader_version": metadata.minimum_reader_version,
-            "database_generation": metadata.database_generation,
-            "application_fingerprint": self.application_fingerprint,
-            "created_at_us": created,
-            "database_bytes": destination.stat().st_size,
-            "sha256": digest.hexdigest(),
-            "counts": counts,
-            "last_committed_receipt_us": last_receipt,
-        }
-        manifest_path = destination.with_suffix(destination.suffix + ".manifest.json")
-        tmp = manifest_path.with_suffix(manifest_path.suffix + ".tmp")
-        tmp.write_text(canonical_json(manifest, max_bytes=64 * 1024) + "\n")
-        os.chmod(tmp, 0o600)
-        _fsync_file(tmp)
-        os.replace(tmp, manifest_path)
-        _fsync_file(manifest_path)
-        _fsync_dir(manifest_path.parent)
+            digest = hashlib.sha256()
+            with destination.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            binding_digest = hashlib.sha256(binding_blob).hexdigest()
+
+            created = utc_now_us()
+            manifest = {
+                "archive_id": metadata.archive_id,
+                "schema_version": metadata.schema_version,
+                "minimum_reader_version": metadata.minimum_reader_version,
+                "database_generation": metadata.database_generation,
+                "application_fingerprint": self.application_fingerprint,
+                "created_at_us": created,
+                "database_bytes": destination.stat().st_size,
+                "sha256": digest.hexdigest(),
+                "counts": counts,
+                "last_committed_receipt_us": last_receipt,
+                "target_database_path": str(self.path),
+                "path_binding_hash": metadata.path_binding_hash,
+                "binding_file": binding_copy.name,
+                "binding_sha256": binding_digest,
+            }
+            manifest_blob = (
+                canonical_json(manifest, max_bytes=64 * 1024) + "\n"
+            ).encode()
+            fd = os.open(manifest_tmp, flags, 0o600)
+            try:
+                with os.fdopen(fd, "wb") as handle:
+                    handle.write(manifest_blob)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            except BaseException:
+                with suppress(OSError):
+                    manifest_tmp.unlink()
+                raise
+            os.replace(manifest_tmp, manifest_path)
+            _fsync_file(manifest_path)
+            _fsync_dir(manifest_path.parent)
+        except BaseException:
+            for artifact in (
+                manifest_tmp,
+                manifest_path,
+                binding_tmp,
+                binding_copy,
+                destination,
+            ):
+                with suppress(OSError):
+                    artifact.unlink()
+            raise
+
         return {
             "database": str(destination),
+            "binding": str(binding_copy),
             "manifest": str(manifest_path),
             "created_at_us": created,
             "counts": counts,
@@ -594,7 +653,7 @@ class ArchiveDatabase:
         }
 
     async def async_backup(self, destination: Path) -> dict[str, Any]:
-        """Create a consistent SQLite online backup and semantic manifest."""
+        """Create a consistent, identity-complete archive recovery bundle."""
         if self._reader_pool is None:
             raise ArchiveError("Archive reader pool is unavailable")
         loop = asyncio.get_running_loop()
@@ -607,7 +666,7 @@ class ArchiveDatabase:
 
     @staticmethod
     def validate_backup_sync(database: Path, manifest: Path) -> dict[str, Any]:
-        """Open a closed snapshot and verify hash/schema/integrity/count semantics."""
+        """Verify a closed snapshot and its identity-complete recovery bundle."""
         database = Path(database)
         manifest = Path(manifest)
         try:
@@ -621,6 +680,30 @@ class ArchiveDatabase:
             raise ArchiveError("Backup manifest is unreadable") from err
         if not isinstance(payload, dict):
             raise ArchiveError("Backup manifest is invalid")
+
+        binding_name = payload.get("binding_file")
+        if (
+            not isinstance(binding_name, str)
+            or not binding_name
+            or Path(binding_name).name != binding_name
+        ):
+            raise ArchiveError("Backup binding filename is invalid")
+        binding_path = manifest.parent / binding_name
+        try:
+            raw_binding = binding_path.read_bytes()
+            if len(raw_binding) > 16 * 1024:
+                raise ArchiveError("Backup binding is oversized")
+            binding = json.loads(raw_binding)
+        except ArchiveError:
+            raise
+        except (OSError, ValueError, UnicodeError) as err:
+            raise ArchiveError("Backup binding is unreadable") from err
+        if not isinstance(binding, dict):
+            raise ArchiveError("Backup binding is invalid")
+        if hashlib.sha256(raw_binding).hexdigest() != payload.get(
+            "binding_sha256"
+        ):
+            raise ArchiveError("Backup binding hash mismatch")
 
         digest = hashlib.sha256()
         with database.open("rb") as handle:
@@ -651,6 +734,8 @@ class ArchiveDatabase:
                 raise ArchiveError("Backup minimum reader version mismatch")
             if metadata.database_generation != payload.get("database_generation"):
                 raise ArchiveError("Backup database generation mismatch")
+            if metadata.path_binding_hash != payload.get("path_binding_hash"):
+                raise ArchiveError("Backup path binding metadata mismatch")
             counts = {
                 table: int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
                 for table in (
@@ -668,6 +753,22 @@ class ArchiveDatabase:
             ).fetchone()[0]
         finally:
             conn.close()
+
+        target_path = payload.get("target_database_path")
+        if not isinstance(target_path, str) or not target_path:
+            raise ArchiveError("Backup restore target is invalid")
+        if binding.get("binding_version") != _BINDING_VERSION:
+            raise ArchiveError("Backup binding version is unsupported")
+        if binding.get("archive_id") != metadata.archive_id:
+            raise ArchiveError("Backup binding archive identity mismatch")
+        if binding.get("database_path") != target_path:
+            raise ArchiveError("Backup binding restore target mismatch")
+        if (
+            binding.get("path_binding_hash") != metadata.path_binding_hash
+            or binding.get("path_binding_hash") != payload.get("path_binding_hash")
+        ):
+            raise ArchiveError("Backup binding metadata mismatch")
+
         if counts != payload.get("counts"):
             raise ArchiveError("Backup semantic counts mismatch")
         if last_receipt != payload.get("last_committed_receipt_us"):
@@ -678,6 +779,8 @@ class ArchiveDatabase:
             "database_generation": metadata.database_generation,
             "counts": counts,
             "last_committed_receipt_us": last_receipt,
+            "binding_file": binding_name,
+            "target_database_path": target_path,
         }
 
     def stop_accepting(self) -> None:
