@@ -137,6 +137,9 @@ async def _async_start_archive(
     )
     database = ArchiveDatabase(
         archive_path,
+        binding_path=Path(
+            hass.config.path(".storage", "combustion_archive_binding.json")
+        ),
         health=runtime.archive_health,
         application_fingerprint=fingerprint,
         require_qualified_wal=True,
