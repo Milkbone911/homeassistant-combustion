@@ -21,6 +21,7 @@ CONF_AVAILABILITY_TIMEOUT = "availability_timeout"
 CONF_UPDATE_THROTTLE = "update_throttle"
 CONF_ENABLE_ACTIVE_CONNECTION = "enable_active_connection"
 CONF_HISTORY_ENABLED = "history_enabled"
+CONF_LOCAL_CAPTURE_ENABLED = "local_capture_enabled"
 CONF_CLOUD_SYNC_ENABLED = "cloud_sync_enabled"
 
 # Optional MeatNet Cloud link. These values stay in config-entry data, not
@@ -35,6 +36,7 @@ DEFAULT_AVAILABILITY_TIMEOUT = 90
 DEFAULT_UPDATE_THROTTLE = 1.0
 DEFAULT_ENABLE_ACTIVE_CONNECTION = False
 DEFAULT_HISTORY_ENABLED = False
+DEFAULT_LOCAL_CAPTURE_ENABLED = False
 DEFAULT_CLOUD_SYNC_ENABLED = False
 
 ARCHIVE_DIRECTORY = "combustion"
