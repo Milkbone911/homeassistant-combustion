@@ -7,11 +7,11 @@ import hashlib
 import json
 import os
 import queue
-import shutil
 import sqlite3
 import threading
 import uuid
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -20,7 +20,6 @@ from typing import Any, TypeVar
 from .schema import (
     ArchiveMetadata,
     ArchiveSchemaError,
-    SCHEMA_VERSION,
     canonical_json,
     install_schema_v1,
     read_metadata,
@@ -228,7 +227,7 @@ class ArchiveDatabase:
             # The writer thread cannot be killed by cancelling this await.
             # Runtime shutdown retains ownership and explicitly drains it.
             raise
-        except BaseException:
+        except BaseException as err:
             thread = self._thread
             if thread is not None:
                 await asyncio.to_thread(thread.join, 2.0)
@@ -237,7 +236,7 @@ class ArchiveDatabase:
                     self.health.error_category = "start_incomplete"
                     raise ArchiveShutdownIncomplete(
                         "Archive start failed while writer thread is still alive"
-                    )
+                    ) from err
             self._thread = None
             self._release_guard()
             raise
@@ -289,10 +288,8 @@ class ArchiveDatabase:
                 handle.flush()
                 os.fsync(handle.fileno())
         except BaseException:
-            try:
+            with suppress(OSError):
                 tmp.unlink()
-            except OSError:
-                pass
             raise
         os.replace(tmp, self.binding_path)
         _fsync_file(self.binding_path)
@@ -404,10 +401,8 @@ class ArchiveDatabase:
                 self.health.error_category = "writer"
         finally:
             if conn is not None:
-                try:
+                with suppress(sqlite3.Error):
                     conn.close()
-                except sqlite3.Error:
-                    pass
 
     async def async_write(self, fn: _WRITE[_T]) -> _T:
         """Serialize one connection-affine operation on the writer thread."""
@@ -509,20 +504,14 @@ class ArchiveDatabase:
         except BaseException:
             dest.close()
             source.close()
-            try:
+            with suppress(OSError):
                 destination.unlink()
-            except OSError:
-                pass
             raise
         finally:
-            try:
+            with suppress(sqlite3.Error):
                 dest.close()
-            except sqlite3.Error:
-                pass
-            try:
+            with suppress(sqlite3.Error):
                 source.close()
-            except sqlite3.Error:
-                pass
 
         digest = hashlib.sha256()
         with destination.open("rb") as handle:
