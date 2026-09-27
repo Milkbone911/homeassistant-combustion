@@ -47,15 +47,19 @@ This matches the vendor SDK architecture: Combustion's Android and iOS
 frameworks arbitrate Normal and Instant Read independently and keep separate
 last-update/source-priority state.
 
-S2c therefore treats advertisement-only mode as evidence, not a total order:
+S2c therefore treats mode packets as evidence, not a total order, across both
+advertisements and the already-owned GATT Probe Status stream:
 
-- one recent advertisement mode -> that mode may be projected;
-- multiple recent advertisement modes -> `unknown`, because arrival order
-  cannot prove a physical transition;
-- a fresh mode from the already-owned GATT Probe Status stream overrides
-  ambiguous advertisement evidence;
-- disconnect or status staleness removes that stronger evidence rather than
-  resurrecting an old mode.
+- one recent observed mode -> that mode may be projected;
+- multiple recent observed modes -> `unknown`, because arrival order cannot
+  prove a physical transition;
+- GATT does not erase conflicting recent advertisement evidence, and a later
+  GATT packet does not become global "mode truth";
+- disconnect removes retained GATT mode evidence rather than resurrecting an
+  old mode.
+
+This matches the vendor managers more closely: Normal and Instant Read are
+handled as independent data paths even for Probe Status notifications.
 
 This preserves the Mode entity/unique ID while avoiding fabricated transition
 churn. Its source/provenance attributes still use the latest selected packet.
@@ -98,9 +102,9 @@ S2c retains the last parsed prediction internally as source evidence, but
 `prediction(serial)` exposes it as current only while:
 
 - the probe is currently connected through the shared `ConnectionManager`;
-- a valid Probe Status notification has been received since the most recent
-  disconnect; and
-- that notification is less than 15 seconds old.
+- a valid **Normal-mode** Probe Status notification has been received since
+  the most recent disconnect; and
+- that qualified notification is less than 15 seconds old.
 
 The 15-second bound follows Combustion's official open-source iOS BLE framework,
 whose public `Probe.stale` contract marks a probe stale when no advertising
@@ -109,13 +113,18 @@ data or notifications have arrived within 15 seconds:
 https://github.com/combustion-inc/combustion-ios-ble
 
 A disconnect immediately invalidates current prediction fitness. A rapid
-reconnect does not resurrect the old ETA; a new Probe Status notification is
-required. A timer refreshes Home Assistant entities when the freshness window
-expires even if no later GATT notification arrives.
+reconnect does not resurrect the old ETA; a new **Normal-mode** Probe Status
+notification is required. Instant-Read Probe Status does not update current
+prediction state. This mirrors the official Android/iOS manager behavior and
+prevents the live-observed `inserted` / `not_inserted` churn caused by
+interpreting mode-specific status bytes as one prediction stream. A timer
+refreshes Home Assistant entities when the freshness window expires even if no
+later qualified GATT notification arrives.
 
-Prediction observations are offered inside `PredictionManager`, before entity
-projection, so a future S4 observer does not replace the Probe Status
-subscription or compete with the existing GATT owner.
+Qualified Normal-mode prediction observations are offered inside
+`PredictionManager`, before entity projection, so a future S4 observer does
+not replace the Probe Status subscription or compete with the existing GATT
+owner.
 
 ## Source acceptance
 
@@ -124,14 +133,15 @@ The S2c source gate requires:
 - first-ever instant-read does not populate normal/core/surface/ambient values;
 - normal -> instant -> normal preserves only the last valid normal data during
   the instant interval and tracks mode without latest-packet flip-flop;
-- conflicting recent normal/Instant-Read advertisement streams resolve to
-  `unknown` unless a fresh existing Probe Status notification supplies the
-  stronger current mode;
+- conflicting recent normal/Instant-Read evidence from advertisements and/or
+  Probe Status resolves to `unknown` rather than latest-packet flapping;
 - selected BLE observations are offered before entity-failure gating;
 - direct-over-repeated selection remains shared and unchanged;
 - listener/observer failures do not stop healthy fan-out;
 - reception envelope fields are frozen at the seam;
-- fresh prediction becomes stale after the bounded notification interval;
+- Instant-Read status cannot overwrite current prediction state;
+- fresh Normal-mode prediction becomes stale after the bounded notification
+  interval;
 - disconnect immediately invalidates current prediction;
 - reconnect without a fresh status notification does not restore an old
   prediction;
@@ -159,7 +169,7 @@ hardware on the intended Home Assistant deployment:
      from the instant packet;
    - confirm the Mode entity reports `instant_read` when evidence is
      unambiguous; `unknown` is truthful if conflicting recent advertisement
-     streams exist before a fresh Probe Status notification.
+     streams exist.
 
 2. **Normal -> instant -> normal**
    - observe valid normal values;
@@ -167,7 +177,7 @@ hardware on the intended Home Assistant deployment:
    - confirm normal values do not jump to invalid instant-mode T2-T8 values;
    - confirm Mode does not oscillate rapidly between `normal` and
      `instant_read`; a short `unknown` ambiguity interval is acceptable
-     until stale advertisement evidence clears or fresh Probe Status resolves it;
+     until conflicting mode evidence ages out;
    - return to normal mode and confirm new normal readings resume.
 
 3. **Fresh -> stale prediction**
@@ -175,8 +185,10 @@ hardware on the intended Home Assistant deployment:
      prediction entities are current;
    - interrupt/disconnect the GATT path and confirm they become unavailable
      without affecting ordinary BLE entities;
-   - reconnect without relying on an old ETA; a fresh status notification must
-     restore current prediction state;
+   - reconnect without relying on an old ETA; a fresh **Normal-mode** status
+     notification must restore current prediction state;
+   - Instant-Read status must not replace a valid prediction with a spurious
+     alternate state;
    - separately allow the status stream to go quiet long enough to verify the
      stale timeout behavior where practical.
 
