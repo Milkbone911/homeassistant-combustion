@@ -7,6 +7,7 @@ from typing import Any
 
 import voluptuous as vol
 
+import homeassistant.helpers.config_validation as cv
 from homeassistant.components import websocket_api
 from homeassistant.components.websocket_api import (
     ERR_NOT_FOUND,
@@ -14,7 +15,6 @@ from homeassistant.components.websocket_api import (
     ERR_UNKNOWN_ERROR,
 )
 from homeassistant.core import HomeAssistant, callback
-import homeassistant.helpers.config_validation as cv
 
 from .const import DOMAIN
 from .reconciliation.sync import MAX_WORK_PER_CYCLE
