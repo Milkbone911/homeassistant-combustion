@@ -127,14 +127,14 @@ def test_normal_instant_normal_keeps_normal_cache_age_and_tracks_current_mode():
         assert manager.current_mode_name("abc123") == "normal"
         assert manager.probe_data("abc123").temperature_data == [30.0] * 8
 
-        monotonic.return_value = 101.1
+        monotonic.return_value = 106.0
         update(instant)
         assert manager.current_mode_name("abc123") == "instant_read"
         assert manager.instant_read_temperature("abc123") == 88.0
         # Invalid instant-mode T2-T8 never refresh the normal cache.
         assert manager.probe_data("abc123").temperature_data == [30.0] * 8
 
-        monotonic.return_value = 102.2
+        monotonic.return_value = 112.0
         update(normal_2)
         assert manager.current_mode_name("abc123") == "normal"
         assert manager.probe_data("abc123").temperature_data == [40.0] * 8
@@ -156,6 +156,35 @@ def _fake_probe_data(device_type: str, *, mode=ProbeMode.normal, tag: str = ""):
         rssi=-60,
         tag=tag,
     )
+
+
+def test_conflicting_advertisement_modes_report_unknown_instead_of_flapping():
+    """Interleaved mode streams are ambiguous, not physical mode transitions."""
+    manager = ProbeManager(bt_listener=None)
+    manager.init_sensor_platform(lambda _manager, _data: None)
+    manager.init_binary_sensor_platform(lambda _manager, _data: None)
+    update = manager.create_update_callback()
+
+    normal = _fake_probe_data("PROBE", mode=ProbeMode.normal, tag="normal")
+    instant = _fake_probe_data("PROBE", mode=ProbeMode.instantRead, tag="instant")
+
+    with patch(
+        "custom_components.combustion.probe_manager.time.monotonic",
+        return_value=100.0,
+    ) as monotonic:
+        update(normal)
+        assert manager.current_mode_name("abc123") == "normal"
+
+        monotonic.return_value = 101.0
+        update(instant)
+        assert manager.current_mode_name("abc123") == "unknown"
+
+        monotonic.return_value = 102.0
+        update(normal)
+        assert manager.current_mode_name("abc123") == "unknown"
+
+        monotonic.return_value = 108.0
+        assert manager.current_mode_name("abc123") is None
 
 
 def test_selected_observation_seam_precedes_entity_failure_and_source_rejection():
@@ -292,7 +321,7 @@ class _FakeConnectionManager:
             listener()
 
 
-def _prediction_status_packet() -> bytes:
+def _prediction_status_packet(mode: ProbeMode = ProbeMode.normal) -> bytes:
     # state=predicting(3), mode=time_to_removal(1), type=removal(1),
     # setpoint=65.0C, heat start=10.0C, 1230s, estimated core=62.5C.
     state, mode, ptype = 3, 1, 1
@@ -304,7 +333,54 @@ def _prediction_status_packet() -> bytes:
     d4 = (seconds >> 4) & 0xFF
     d5 = ((seconds >> 12) & 0x1F) | ((core & 0x07) << 5)
     d6 = (core >> 3) & 0xFF
-    return bytes(PREDICTION_STATUS_OFFSET) + bytes([d0, d1, d2, d3, d4, d5, d6])
+    prefix = bytearray(PREDICTION_STATUS_OFFSET)
+    prefix[21] = mode.value
+    return bytes(prefix) + bytes([d0, d1, d2, d3, d4, d5, d6])
+
+
+def test_fresh_gatt_status_mode_overrides_ambiguous_advertisements(
+    hass: HomeAssistant,
+):
+    """The existing Probe Status subscription supplies stronger current-mode evidence."""
+    probe_manager = ProbeManager(bt_listener=None)
+    probe_manager.init_sensor_platform(lambda _manager, _data: None)
+    probe_manager.init_binary_sensor_platform(lambda _manager, _data: None)
+    update = probe_manager.create_update_callback()
+
+    connection = _FakeConnectionManager()
+    connection.connected.add("abc123")
+    entry = MagicMock()
+    entry.async_on_unload = MagicMock()
+    prediction_manager = PredictionManager(hass, entry, connection, probe_manager)
+    prediction_manager.async_init()
+
+    normal = _fake_probe_data("PROBE", mode=ProbeMode.normal)
+    instant = _fake_probe_data("PROBE", mode=ProbeMode.instantRead)
+
+    with patch(
+        "custom_components.combustion.probe_manager.time.monotonic",
+        return_value=100.0,
+    ) as monotonic:
+        update(normal)
+        monotonic.return_value = 101.0
+        update(instant)
+        assert probe_manager.current_mode_name("abc123") == "unknown"
+
+        with patch(
+            "custom_components.combustion.prediction_manager.time.monotonic",
+            return_value=101.5,
+        ):
+            connection.subscriptions[PROBE_STATUS_CHAR](
+                "abc123", _prediction_status_packet(ProbeMode.normal)
+            )
+        monotonic.return_value = 101.5
+        assert probe_manager.current_mode_name("abc123") == "normal"
+
+        connection.connected.remove("abc123")
+        connection.fire_connection_change()
+        assert probe_manager.current_mode_name("abc123") == "unknown"
+
+    prediction_manager.async_unload()
 
 
 @pytest.mark.asyncio
