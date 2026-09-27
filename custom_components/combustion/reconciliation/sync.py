@@ -83,6 +83,7 @@ class CloudSyncSupervisor:
         self._subject: str | None = None
         self._account_id: str | None = None
         self._next_context_refresh_us = 0
+        self._cycle_lock = asyncio.Lock()
 
     def _link_matches(self) -> bool:
         return (
@@ -281,38 +282,42 @@ class CloudSyncSupervisor:
         force_context_refresh: bool = False,
         max_work: int = MAX_WORK_PER_CYCLE,
     ) -> int:
-        """Perform bounded discovery/work; every progress claim is DB-backed."""
+        """Perform one serialized bounded cycle; progress is DB-backed."""
         if not 1 <= max_work <= MAX_WORK_PER_CYCLE:
             raise ValueError("Invalid sync cycle budget")
-        self.health.status = SyncStatus.SYNCING
-        now = utc_now_us()
 
-        if (
-            force_context_refresh
-            or self._client is None
-            or now >= self._next_context_refresh_us
-        ):
-            await self._refresh_context()
+        async with self._cycle_lock:
+            self.health.status = SyncStatus.SYNCING
+            now = utc_now_us()
 
-        if self._account_id is None:
-            raise CloudTransportError("Archive account context is unavailable")
+            if (
+                force_context_refresh
+                or self._client is None
+                or now >= self._next_context_refresh_us
+            ):
+                await self._refresh_context()
 
-        processed = 0
-        for _ in range(max_work):
-            work = await self.repository.async_claim_work(
-                account_id=self._account_id,
-                now_us=utc_now_us(),
-            )
-            if work is None:
-                break
-            await self._process_work(work)
-            processed += 1
+            if self._account_id is None:
+                raise CloudTransportError(
+                    "Archive account context is unavailable"
+                )
 
-        await self._refresh_queue_health()
-        self.health.status = SyncStatus.IDLE
-        self.health.last_error_category = None
-        self.health.last_success_us = utc_now_us()
-        return processed
+            processed = 0
+            for _ in range(max_work):
+                work = await self.repository.async_claim_work(
+                    account_id=self._account_id,
+                    now_us=utc_now_us(),
+                )
+                if work is None:
+                    break
+                await self._process_work(work)
+                processed += 1
+
+            await self._refresh_queue_health()
+            self.health.status = SyncStatus.IDLE
+            self.health.last_error_category = None
+            self.health.last_success_us = utc_now_us()
+            return processed
 
     async def async_run(self) -> None:
         """Long-running entry-owned supervisor with bounded work opportunities."""
