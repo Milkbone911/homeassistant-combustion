@@ -688,21 +688,21 @@ async def test_local_observation_identity_conflict_is_rejected(tmp_path: Path):
         runtime_generation=runtime_generation
     )
     observation_id = local_observation_identity(runtime_generation, 0)
-    base = dict(
-        observation_id=observation_id,
-        capture_run_id=run_id,
-        subject_kind="gauge",
-        raw_serial="g1",
-        event_ordinal=0,
-        observation_kind="ble",
-        capture_class="transition",
-        received_at_us=100,
-        received_monotonic_ns=1000,
-        route_kind="self",
-        freshness_basis="callback_receipt",
-        valid_fields=("t1",),
-        mode_name=None,
-    )
+    base = {
+        "observation_id": observation_id,
+        "capture_run_id": run_id,
+        "subject_kind": "gauge",
+        "raw_serial": "g1",
+        "event_ordinal": 0,
+        "observation_kind": "ble",
+        "capture_class": "transition",
+        "received_at_us": 100,
+        "received_monotonic_ns": 1000,
+        "route_kind": "self",
+        "freshness_basis": "callback_receipt",
+        "valid_fields": ("t1",),
+        "mode_name": None,
+    }
     first = LocalObservationRecord(payload={"t1": 100.0}, **base)
     changed = LocalObservationRecord(payload={"t1": 101.0}, **base)
 
