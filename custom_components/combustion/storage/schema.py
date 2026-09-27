@@ -9,8 +9,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-SCHEMA_VERSION = 2
-MINIMUM_READER_VERSION = 2
+SCHEMA_VERSION = 3
+MINIMUM_READER_VERSION = 3
 SCHEMA_V1_MINIMUM_READER_VERSION = 1
 MAX_RAW_JSON_BYTES = 256 * 1024
 
@@ -370,9 +370,41 @@ ON local_capture_gaps(first_lost_at_us, last_lost_at_us);
 """
 
 SCHEMA_V2_CHECKSUM = hashlib.sha256(SCHEMA_V2_SQL.encode()).hexdigest()
+
+SCHEMA_V3_SQL = """
+CREATE TABLE identity_links (
+    identity_link_id TEXT PRIMARY KEY,
+    source_device_id TEXT NOT NULL
+        REFERENCES source_devices(source_device_id) ON DELETE RESTRICT,
+    local_source_id TEXT NOT NULL
+        REFERENCES local_sources(local_source_id) ON DELETE RESTRICT,
+    canonical_serial TEXT NOT NULL,
+    evidence_kind TEXT NOT NULL CHECK (evidence_kind IN ('exact_serial')),
+    evidence_json TEXT NOT NULL,
+    evidence_hash TEXT NOT NULL,
+    created_at_us INTEGER NOT NULL,
+    ended_at_us INTEGER,
+    end_reason TEXT,
+    CHECK (
+        (ended_at_us IS NULL AND end_reason IS NULL)
+        OR (ended_at_us IS NOT NULL AND end_reason IS NOT NULL)
+    ),
+    CHECK (ended_at_us IS NULL OR ended_at_us >= created_at_us)
+);
+CREATE UNIQUE INDEX idx_identity_links_active_source
+ON identity_links(source_device_id)
+WHERE ended_at_us IS NULL;
+CREATE INDEX idx_identity_links_local
+ON identity_links(local_source_id, created_at_us DESC);
+CREATE INDEX idx_identity_links_serial
+ON identity_links(canonical_serial, created_at_us DESC);
+"""
+
+SCHEMA_V3_CHECKSUM = hashlib.sha256(SCHEMA_V3_SQL.encode()).hexdigest()
 _MIGRATION_CHECKSUMS = {
     1: SCHEMA_V1_CHECKSUM,
     2: SCHEMA_V2_CHECKSUM,
+    3: SCHEMA_V3_CHECKSUM,
 }
 
 
@@ -458,6 +490,55 @@ def read_metadata_compatible(conn: sqlite3.Connection) -> ArchiveMetadata:
     return metadata
 
 
+def _apply_migration(
+    conn: sqlite3.Connection,
+    *,
+    from_version: int,
+    to_version: int,
+    minimum_reader_version: int,
+    sql: str,
+    checksum: str,
+    application_fingerprint: str,
+) -> None:
+    """Apply one audited forward migration transaction."""
+    now = utc_now_us()
+    try:
+        conn.executescript("BEGIN IMMEDIATE;\n" + sql)
+        conn.execute(
+            """
+            UPDATE archive_meta
+            SET schema_version=?,
+                minimum_reader_version=?,
+                database_generation=database_generation+1,
+                application_fingerprint=?
+            WHERE id=1 AND schema_version=?
+            """,
+            (
+                to_version,
+                minimum_reader_version,
+                application_fingerprint,
+                from_version,
+            ),
+        )
+        if conn.execute("SELECT changes()").fetchone()[0] != 1:
+            raise ArchiveSchemaError("Archive migration metadata update failed")
+        conn.execute(
+            """
+            INSERT INTO schema_migrations(
+                version,checksum,applied_at_us,application_fingerprint
+            ) VALUES(?,?,?,?)
+            """,
+            (to_version, checksum, now, application_fingerprint),
+        )
+        conn.execute("COMMIT")
+    except (sqlite3.Error, ArchiveSchemaError) as err:
+        with suppress(sqlite3.Error):
+            conn.execute("ROLLBACK")
+        if isinstance(err, ArchiveSchemaError):
+            raise
+        raise ArchiveSchemaError("Archive schema migration failed") from err
+
+
 def migrate_schema(
     conn: sqlite3.Connection,
     *,
@@ -467,40 +548,33 @@ def migrate_schema(
     metadata = read_metadata_compatible(conn)
     if metadata.schema_version == SCHEMA_VERSION:
         return metadata
-    if metadata.schema_version != 1:
-        raise ArchiveSchemaError("Archive schema has no supported migration path")
 
-    now = utc_now_us()
-    try:
-        conn.executescript("BEGIN IMMEDIATE;\n" + SCHEMA_V2_SQL)
-        conn.execute(
-            """
-            UPDATE archive_meta
-            SET schema_version=?,
-                minimum_reader_version=?,
-                database_generation=database_generation+1,
-                application_fingerprint=?
-            WHERE id=1 AND schema_version=1
-            """,
-            (SCHEMA_VERSION, MINIMUM_READER_VERSION, application_fingerprint),
+    if metadata.schema_version == 1:
+        _apply_migration(
+            conn,
+            from_version=1,
+            to_version=2,
+            minimum_reader_version=2,
+            sql=SCHEMA_V2_SQL,
+            checksum=SCHEMA_V2_CHECKSUM,
+            application_fingerprint=application_fingerprint,
         )
-        if conn.execute("SELECT changes()").fetchone()[0] != 1:
-            raise ArchiveSchemaError("Archive migration metadata update failed")
-        conn.execute(
-            """
-            INSERT INTO schema_migrations(
-                version,checksum,applied_at_us,application_fingerprint
-            ) VALUES(2,?,?,?)
-            """,
-            (SCHEMA_V2_CHECKSUM, now, application_fingerprint),
+        metadata = read_metadata_compatible(conn)
+
+    if metadata.schema_version == 2:
+        _apply_migration(
+            conn,
+            from_version=2,
+            to_version=3,
+            minimum_reader_version=3,
+            sql=SCHEMA_V3_SQL,
+            checksum=SCHEMA_V3_CHECKSUM,
+            application_fingerprint=application_fingerprint,
         )
-        conn.execute("COMMIT")
-    except (sqlite3.Error, ArchiveSchemaError) as err:
-        with suppress(sqlite3.Error):
-            conn.execute("ROLLBACK")
-        if isinstance(err, ArchiveSchemaError):
-            raise
-        raise ArchiveSchemaError("Archive schema migration failed") from err
+        metadata = read_metadata_compatible(conn)
+
+    if metadata.schema_version != SCHEMA_VERSION:
+        raise ArchiveSchemaError("Archive schema has no supported migration path")
     return read_metadata(conn)
 
 
