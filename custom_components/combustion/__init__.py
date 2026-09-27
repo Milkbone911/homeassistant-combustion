@@ -155,6 +155,11 @@ async def _async_start_archive(
         repository = ArchiveRepository(database)
         runtime.archive_repository = repository
         await repository.async_recover_interrupted_work()
+        # Reconcile stale local-capture generations whenever the archive opens,
+        # even if local capture is currently disabled. A prior unclean unload
+        # must remain visible as interrupted evidence instead of lingering as
+        # a false running interval until capture is enabled again.
+        await repository.async_recover_interrupted_local_captures()
     except ArchiveRuntimeUnsupported:
         runtime.archive_health.status = ArchiveStatus.UNSUPPORTED
         runtime.archive_health.error_category = "sqlite_runtime"
