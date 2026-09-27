@@ -19,6 +19,7 @@ from custom_components.combustion.local_capture import (
     LocalCaptureSupervisor,
 )
 from custom_components.combustion.prediction_manager import PredictionObservation
+from custom_components.combustion.probe_manager import ProbeManager
 from custom_components.combustion.storage.database import ArchiveDatabase
 from custom_components.combustion.storage.repository import ArchiveRepository
 from tests.utils.bt_utils import create_advertisement, create_combustion_bits
@@ -399,4 +400,64 @@ async def test_interrupted_capture_recovery_marks_uncertain_window(
         "interrupted",
         ("unclean_shutdown", None, "uncertain"),
     )
+    await database.async_stop()
+
+
+@pytest.mark.asyncio
+async def test_entity_factory_failure_does_not_stop_archive_capture(
+    hass: HomeAssistant,
+    tmp_path: Path,
+):
+    """The S4 sink runs before the ProbeManager entity-failure gate."""
+    database = ArchiveDatabase(
+        tmp_path / "factory-failure" / "archive.sqlite3",
+        require_qualified_wal=False,
+    )
+    await database.async_start(allow_create=True)
+    repository = ArchiveRepository(database)
+
+    probe_manager = ProbeManager(bt_listener=None)
+    factory_calls = 0
+
+    def fail_factory(_manager, _data) -> None:
+        nonlocal factory_calls
+        factory_calls += 1
+        raise RuntimeError("synthetic entity factory failure")
+
+    probe_manager.init_sensor_platform(fail_factory)
+    probe_manager.init_binary_sensor_platform(fail_factory)
+    predictions = _FakeObservationManager()
+    health = LocalCaptureHealth()
+    supervisor = LocalCaptureSupervisor(
+        hass,
+        _FakeEntry(),  # type: ignore[arg-type]
+        repository,
+        probe_manager,
+        predictions,  # type: ignore[arg-type]
+        health,
+    )
+    await supervisor.async_start()
+
+    update = probe_manager.create_observation_callback()
+    update(_probe_observation(30.0, monotonic=600.0, epoch=6_000.0))
+    # ProbeManager remembers the failed device and skips future entity creation,
+    # but the archive offer is deliberately before that failed-device return.
+    update(_probe_observation(31.0, monotonic=602.0, epoch=6_002.0))
+
+    await supervisor.async_stop()
+
+    assert factory_calls == 1
+    rows = await database.async_read(
+        lambda conn: conn.execute(
+            """
+            SELECT capture_class,t1 FROM local_observations
+            ORDER BY event_ordinal
+            """
+        ).fetchall()
+    )
+    assert rows == [
+        ("transition", 30.0),
+        ("regular", 31.0),
+    ]
+    assert health.committed_observations == 2
     await database.async_stop()
