@@ -200,7 +200,11 @@ class LocalCaptureSupervisor:
             raw_serial=observation.serial,
             observation_kind="prediction",
             capture_class="prediction",
-            received_at_epoch=time.time(),
+            received_at_epoch=(
+                observation.received_at_epoch
+                if observation.received_at_epoch is not None
+                else time.time()
+            ),
             received_at_monotonic=observation.received_at_monotonic,
             route_kind="gatt",
             freshness_basis="gatt_status",
@@ -327,7 +331,10 @@ class LocalCaptureSupervisor:
 
         if isinstance(data, NodeData):
             serial = data.serial_number
-            payload = {"high_radio_power": data.high_radio_power}
+            payload = {
+                "device_type": data.device_type,
+                "high_radio_power": data.high_radio_power,
+            }
             signature = (data.high_radio_power,)
             is_regular = not self._signature_changed("node", serial, signature)
             return (
@@ -554,11 +561,14 @@ class LocalCaptureSupervisor:
         if self.health.status is LocalCaptureStatus.STOPPED:
             return
         self.health.status = LocalCaptureStatus.STOPPING
-        self._stopping = True
         self._detach_listeners()
 
+        # Intake is detached, so no new callbacks can race this final policy
+        # flush. Keep enqueueing enabled until the newest pending regular
+        # observation for each source has entered the drain queue.
         for key in tuple(self._pending_regular):
             self._flush_regular(key)
+        self._stopping = True
         for handle in self._regular_timers.values():
             handle.cancel()
         self._regular_timers.clear()
