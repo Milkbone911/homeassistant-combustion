@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import sqlite3
 import threading
@@ -277,9 +278,18 @@ def test_backup_hash_tamper_is_rejected(tmp_path: Path):
     """A snapshot manifest cannot bless changed bytes."""
     database = tmp_path / "backup.sqlite3"
     database.write_bytes(b"not-a-real-sqlite-db")
+    binding = tmp_path / "backup.sqlite3.binding.json"
+    binding.write_text("{}")
+    binding_sha256 = hashlib.sha256(binding.read_bytes()).hexdigest()
     manifest = tmp_path / "backup.sqlite3.manifest.json"
     manifest.write_text(
-        '{"archive_id":"x","sha256":"deadbeef","counts":{}}'
+        json.dumps(
+            {
+                "binding_file": binding.name,
+                "binding_sha256": binding_sha256,
+                "sha256": "deadbeef",
+            }
+        )
     )
 
     with pytest.raises(ArchiveError, match="hash"):

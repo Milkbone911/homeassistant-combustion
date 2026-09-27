@@ -128,6 +128,28 @@ def _fsync_file(path: Path) -> None:
         os.fsync(handle.fileno())
 
 
+def _read_backup_json(
+    path: Path,
+    *,
+    max_bytes: int,
+    label: str,
+) -> tuple[dict[str, Any], bytes]:
+    """Read one bounded JSON object from a backup bundle."""
+    try:
+        raw = path.read_bytes()
+    except OSError as err:
+        raise ArchiveError(f"{label} is unreadable") from err
+    if len(raw) > max_bytes:
+        raise ArchiveError(f"{label} is oversized")
+    try:
+        payload = json.loads(raw)
+    except (ValueError, UnicodeError) as err:
+        raise ArchiveError(f"{label} is unreadable") from err
+    if not isinstance(payload, dict):
+        raise ArchiveError(f"{label} is invalid")
+    return payload, raw
+
+
 def _fsync_dir(path: Path) -> None:
     try:
         fd = os.open(path, os.O_RDONLY)
@@ -669,17 +691,11 @@ class ArchiveDatabase:
         """Verify a closed snapshot and its identity-complete recovery bundle."""
         database = Path(database)
         manifest = Path(manifest)
-        try:
-            raw_manifest = manifest.read_bytes()
-            if len(raw_manifest) > 64 * 1024:
-                raise ArchiveError("Backup manifest is oversized")
-            payload = json.loads(raw_manifest)
-        except ArchiveError:
-            raise
-        except (OSError, ValueError, UnicodeError) as err:
-            raise ArchiveError("Backup manifest is unreadable") from err
-        if not isinstance(payload, dict):
-            raise ArchiveError("Backup manifest is invalid")
+        payload, _raw_manifest = _read_backup_json(
+            manifest,
+            max_bytes=64 * 1024,
+            label="Backup manifest",
+        )
 
         binding_name = payload.get("binding_file")
         if (
@@ -689,17 +705,11 @@ class ArchiveDatabase:
         ):
             raise ArchiveError("Backup binding filename is invalid")
         binding_path = manifest.parent / binding_name
-        try:
-            raw_binding = binding_path.read_bytes()
-            if len(raw_binding) > 16 * 1024:
-                raise ArchiveError("Backup binding is oversized")
-            binding = json.loads(raw_binding)
-        except ArchiveError:
-            raise
-        except (OSError, ValueError, UnicodeError) as err:
-            raise ArchiveError("Backup binding is unreadable") from err
-        if not isinstance(binding, dict):
-            raise ArchiveError("Backup binding is invalid")
+        binding, raw_binding = _read_backup_json(
+            binding_path,
+            max_bytes=16 * 1024,
+            label="Backup binding",
+        )
         if hashlib.sha256(raw_binding).hexdigest() != payload.get(
             "binding_sha256"
         ):
