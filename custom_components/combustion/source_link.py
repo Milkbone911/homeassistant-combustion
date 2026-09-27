@@ -54,6 +54,7 @@ class SourceLinkRepository:
     """S5 source-link reads/writes using the archive's existing writer owner."""
 
     def __init__(self, database: ArchiveDatabase) -> None:
+        """Initialize."""
         self.database = database
 
     async def async_reconcile(self) -> dict[str, int]:
