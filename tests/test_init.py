@@ -414,6 +414,12 @@ async def test_direct_data_preferred_over_repeated(hass: HomeAssistant):
         update(Data('PROBE', 'direct-2'))
         assert manager.probe_data('abc123').tag == 'direct-2'
 
+    assert manager.observation_counters == {
+        "received": 4,
+        "selected": 3,
+        "suppressed_repeater": 1,
+    }
+
 
 @pytest.mark.asyncio
 async def test_instant_read_sensor(hass: HomeAssistant):

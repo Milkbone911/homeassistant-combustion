@@ -22,7 +22,9 @@ from .schema import (
     ArchiveSchemaError,
     canonical_json,
     install_schema_v1,
+    migrate_schema,
     read_metadata,
+    read_metadata_compatible,
     utc_now_us,
 )
 
@@ -96,6 +98,31 @@ class _Command:
 
 
 _STOP = object()
+
+_BACKUP_COUNT_TABLES_V1 = (
+    "source_devices",
+    "cloud_sessions",
+    "session_manifests",
+    "cloud_samples",
+    "cloud_sample_versions",
+    "gaps",
+    "sync_receipts",
+)
+_BACKUP_COUNT_TABLES_V2 = _BACKUP_COUNT_TABLES_V1 + (
+    "local_sources",
+    "local_capture_runs",
+    "local_observations",
+    "local_capture_gaps",
+)
+
+
+def _backup_count_tables(schema_version: int) -> tuple[str, ...]:
+    """Return the semantic-count contract for a supported archive schema."""
+    if schema_version == 1:
+        return _BACKUP_COUNT_TABLES_V1
+    if schema_version == 2:
+        return _BACKUP_COUNT_TABLES_V2
+    raise ArchiveSchemaError("Backup schema version is unsupported")
 
 
 def sqlite_wal_fix_qualified(version: str = sqlite3.sqlite_version) -> bool:
@@ -397,14 +424,25 @@ class ArchiveDatabase:
 
             if new_archive:
                 assert archive_id is not None and binding_hash is not None
-                metadata = install_schema_v1(
+                install_schema_v1(
                     conn,
                     archive_id=archive_id,
                     application_fingerprint=self.application_fingerprint,
                     path_binding_hash=binding_hash,
                 )
+                metadata = migrate_schema(
+                    conn,
+                    application_fingerprint=self.application_fingerprint,
+                )
             else:
-                metadata = read_metadata(conn)
+                # Identity qualification precedes any in-place migration. A
+                # mismatched/unbound archive is never mutated into compliance.
+                metadata = read_metadata_compatible(conn)
+                self._validate_binding(metadata)
+                metadata = migrate_schema(
+                    conn,
+                    application_fingerprint=self.application_fingerprint,
+                )
                 self._validate_binding(metadata)
 
             fk = conn.execute("PRAGMA foreign_key_check").fetchone()
@@ -572,15 +610,7 @@ class ArchiveDatabase:
             metadata = read_metadata(dest)
             counts = {
                 table: int(dest.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
-                for table in (
-                    "source_devices",
-                    "cloud_sessions",
-                    "session_manifests",
-                    "cloud_samples",
-                    "cloud_sample_versions",
-                    "gaps",
-                    "sync_receipts",
-                )
+                for table in _backup_count_tables(metadata.schema_version)
             }
             last_receipt = dest.execute(
                 "SELECT MAX(committed_at_us) FROM sync_receipts"
@@ -744,7 +774,7 @@ class ArchiveDatabase:
             quick = conn.execute("PRAGMA quick_check").fetchone()
             if quick is None or quick[0] != "ok":
                 raise ArchiveError("Backup integrity check failed")
-            metadata = read_metadata(conn)
+            metadata = read_metadata_compatible(conn)
             if metadata.archive_id != payload.get("archive_id"):
                 raise ArchiveError("Backup archive identity mismatch")
             if metadata.schema_version != payload.get("schema_version"):
@@ -759,15 +789,7 @@ class ArchiveDatabase:
                 raise ArchiveError("Backup path binding metadata mismatch")
             counts = {
                 table: int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
-                for table in (
-                    "source_devices",
-                    "cloud_sessions",
-                    "session_manifests",
-                    "cloud_samples",
-                    "cloud_sample_versions",
-                    "gaps",
-                    "sync_receipts",
-                )
+                for table in _backup_count_tables(metadata.schema_version)
             }
             last_receipt = conn.execute(
                 "SELECT MAX(committed_at_us) FROM sync_receipts"

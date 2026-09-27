@@ -16,8 +16,11 @@ from custom_components.combustion.storage.database import ArchiveDatabase
 from custom_components.combustion.storage.repository import (
     MANIFEST_RECHECK_US,
     ArchiveRepository,
+    LocalCaptureGapRecord,
+    LocalObservationRecord,
+    local_observation_identity,
 )
-from custom_components.combustion.storage.schema import utc_now_us
+from custom_components.combustion.storage.schema import ArchiveSchemaError, utc_now_us
 
 
 def _index(token: str = "123") -> SessionIndex:
@@ -530,4 +533,182 @@ async def test_work_claims_are_isolated_by_account_namespace(tmp_path: Path):
         is None
     )
     assert old_work.account_id == old_account
+    await db.async_stop()
+
+
+@pytest.mark.asyncio
+async def test_local_observations_are_idempotent_and_source_separated(
+    tmp_path: Path,
+):
+    """S4 local evidence stays outside cloud source identity until S5."""
+    db = await _database(tmp_path)
+    repo = ArchiveRepository(db)
+    runtime_generation = "test-runtime-generation"
+    run_id = await repo.async_begin_local_capture(
+        runtime_generation=runtime_generation,
+        policy_version=1,
+        regular_interval_ms=1000,
+    )
+
+    first = LocalObservationRecord(
+        observation_id=local_observation_identity(runtime_generation, 0),
+        capture_run_id=run_id,
+        subject_kind="probe",
+        raw_serial="abc123",
+        event_ordinal=0,
+        observation_kind="ble",
+        capture_class="regular",
+        received_at_us=100,
+        received_monotonic_ns=1_000,
+        route_kind="direct",
+        freshness_basis="callback_receipt",
+        valid_fields=("t1", "t2"),
+        payload={"t1": 50.0, "t2": 50.0},
+        source_address="AA:BB",
+        scanner_source="proxy-1",
+        rssi=-60,
+        connectable=False,
+        mode_name="normal",
+    )
+    second = LocalObservationRecord(
+        observation_id=local_observation_identity(runtime_generation, 1),
+        capture_run_id=run_id,
+        subject_kind="probe",
+        raw_serial="abc123",
+        event_ordinal=1,
+        observation_kind="ble",
+        capture_class="regular",
+        received_at_us=1_100_000,
+        received_monotonic_ns=1_101_000,
+        route_kind="meat_net",
+        freshness_basis="callback_receipt",
+        valid_fields=("t1", "t2"),
+        payload={"t1": 50.0, "t2": 50.0},
+        source_address="CC:DD",
+        scanner_source="proxy-2",
+        rssi=-70,
+        connectable=False,
+        mode_name="normal",
+    )
+    prediction = LocalObservationRecord(
+        observation_id=local_observation_identity(runtime_generation, 2),
+        capture_run_id=run_id,
+        subject_kind="probe",
+        raw_serial="abc123",
+        event_ordinal=2,
+        observation_kind="prediction",
+        capture_class="prediction",
+        received_at_us=1_200_000,
+        received_monotonic_ns=1_201_000,
+        route_kind="gatt",
+        freshness_basis="gatt_status",
+        valid_fields=("prediction_state", "prediction_value_seconds"),
+        payload={"prediction_state": 3, "prediction_value_seconds": 900},
+        mode_name="normal",
+    )
+
+    assert await repo.async_commit_local_observations(
+        [first, second, prediction]
+    ) == 3
+    assert await repo.async_commit_local_observations(
+        [first, second, prediction]
+    ) == 0
+
+    counts = await repo.async_local_capture_counts()
+    assert counts == {
+        "sources": 1,
+        "runs": 1,
+        "observations": 3,
+        "gaps": 0,
+    }
+    assert await db.async_read(
+        lambda conn: conn.execute(
+            "SELECT COUNT(*) FROM source_devices"
+        ).fetchone()[0]
+    ) == 0
+
+    rows = await db.async_read(
+        lambda conn: conn.execute(
+            """
+            SELECT observation_kind,route_kind,t1,prediction_state
+            FROM local_observations ORDER BY event_ordinal
+            """
+        ).fetchall()
+    )
+    assert rows == [
+        ("ble", "direct", 50.0, None),
+        ("ble", "meat_net", 50.0, None),
+        ("prediction", "gatt", None, 3),
+    ]
+
+    gap = LocalCaptureGapRecord(
+        gap_id="gap-1",
+        capture_run_id=run_id,
+        scope="regular_observation",
+        reason="queue_overflow",
+        first_lost_at_us=1_300_000,
+        last_lost_at_us=1_500_000,
+        dropped_count=4,
+        certainty="observed",
+        subject_kind="probe",
+        raw_serial="abc123",
+    )
+    await repo.async_record_local_capture_gap(gap)
+    assert (await repo.async_local_capture_counts())["gaps"] == 1
+
+    await repo.async_finish_local_capture(run_id)
+    terminal = await db.async_read(
+        lambda conn: conn.execute(
+            "SELECT terminal_status FROM local_capture_runs WHERE capture_run_id=?",
+            (run_id,),
+        ).fetchone()[0]
+    )
+    assert terminal == "clean"
+
+    destination = db.path.parent / "backups" / "archive-s4.sqlite3"
+    result = await db.async_backup(destination)
+    validated = ArchiveDatabase.validate_backup_sync(
+        destination,
+        Path(result["manifest"]),
+    )
+    assert validated["counts"]["local_sources"] == 1
+    assert validated["counts"]["local_capture_runs"] == 1
+    assert validated["counts"]["local_observations"] == 3
+    assert validated["counts"]["local_capture_gaps"] == 1
+    await db.async_stop()
+
+
+@pytest.mark.asyncio
+async def test_local_observation_identity_conflict_is_rejected(tmp_path: Path):
+    """One local event identity cannot silently bless changed source evidence."""
+    db = await _database(tmp_path)
+    repo = ArchiveRepository(db)
+    runtime_generation = "conflict-runtime"
+    run_id = await repo.async_begin_local_capture(
+        runtime_generation=runtime_generation
+    )
+    observation_id = local_observation_identity(runtime_generation, 0)
+    base = {
+        "observation_id": observation_id,
+        "capture_run_id": run_id,
+        "subject_kind": "gauge",
+        "raw_serial": "g1",
+        "event_ordinal": 0,
+        "observation_kind": "ble",
+        "capture_class": "transition",
+        "received_at_us": 100,
+        "received_monotonic_ns": 1000,
+        "route_kind": "self",
+        "freshness_basis": "callback_receipt",
+        "valid_fields": ("t1",),
+        "mode_name": None,
+    }
+    first = LocalObservationRecord(payload={"t1": 100.0}, **base)
+    changed = LocalObservationRecord(payload={"t1": 101.0}, **base)
+
+    assert await repo.async_commit_local_observations([first]) == 1
+    with pytest.raises(ArchiveSchemaError, match="identity conflict"):
+        await repo.async_commit_local_observations([changed])
+
+    assert (await repo.async_local_capture_counts())["observations"] == 1
     await db.async_stop()

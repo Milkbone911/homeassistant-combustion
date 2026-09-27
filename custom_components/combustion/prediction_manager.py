@@ -41,6 +41,7 @@ class PredictionObservation:
     serial: str
     received_at_monotonic: float
     prediction: PredictionData
+    received_at_epoch: float | None = None
 
 
 class PredictionManager:
@@ -216,7 +217,12 @@ class PredictionManager:
         if prediction is None:
             return
 
-        observation = PredictionObservation(serial, received_at, prediction)
+        observation = PredictionObservation(
+            serial,
+            received_at,
+            prediction,
+            received_at_epoch=time.time(),
+        )
 
         # Preserve the qualified prediction observation before any entity
         # callback. S4 can register a bounded queue offer here without adding

@@ -22,6 +22,8 @@ async def async_get_config_entry_diagnostics(
     if database is not None and archive.status is ArchiveStatus.READY:
         await database.async_refresh_sizes()
     sync = runtime.sync_health
+    capture = runtime.local_capture_health
+    selection = runtime.probe_manager.observation_counters
     return {
         "cloud": {
             "linked": cloud_linked(entry.data),
@@ -52,6 +54,20 @@ async def async_get_config_entry_diagnostics(
             "ready_work": sync.ready_work,
             "running_work": sync.running_work,
             "failed_work": sync.failed_work,
+        },
+        "local_capture": {
+            "status": capture.status,
+            "queue_depth": capture.queue_depth,
+            "committed_observations": capture.committed_observations,
+            "dropped_observations": capture.dropped_observations,
+            "coalesced_observations": capture.coalesced_observations,
+            "last_commit_us": capture.last_commit_us,
+            "last_error_category": capture.last_error_category,
+            "received_observations": selection["received"],
+            "selected_observations": selection["selected"],
+            "suppressed_repeater_observations": selection[
+                "suppressed_repeater"
+            ],
         },
         "local": {
             "active_connection_enabled": runtime.connection_manager.enabled,

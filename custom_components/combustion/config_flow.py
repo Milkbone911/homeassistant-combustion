@@ -42,11 +42,13 @@ from .const import (
     CONF_DEVICES,
     CONF_ENABLE_ACTIVE_CONNECTION,
     CONF_HISTORY_ENABLED,
+    CONF_LOCAL_CAPTURE_ENABLED,
     CONF_UPDATE_THROTTLE,
     DEFAULT_AVAILABILITY_TIMEOUT,
     DEFAULT_CLOUD_SYNC_ENABLED,
     DEFAULT_ENABLE_ACTIVE_CONNECTION,
     DEFAULT_HISTORY_ENABLED,
+    DEFAULT_LOCAL_CAPTURE_ENABLED,
     DEFAULT_UPDATE_THROTTLE,
     DOMAIN,
     LOGGER,
@@ -422,6 +424,13 @@ class CombustionOptionsFlowHandler(config_entries.OptionsFlowWithReload):
                     ),
                 ): bool,
                 vol.Optional(
+                    CONF_LOCAL_CAPTURE_ENABLED,
+                    default=options.get(
+                        CONF_LOCAL_CAPTURE_ENABLED,
+                        DEFAULT_LOCAL_CAPTURE_ENABLED,
+                    ),
+                ): bool,
+                vol.Optional(
                     CONF_CLOUD_SYNC_ENABLED,
                     default=options.get(
                         CONF_CLOUD_SYNC_ENABLED,
@@ -433,11 +442,17 @@ class CombustionOptionsFlowHandler(config_entries.OptionsFlowWithReload):
 
         errors: dict[str, str] = {}
         if user_input is not None:
+            history_enabled = user_input.get(CONF_HISTORY_ENABLED, False)
             if (
                 user_input.get(CONF_CLOUD_SYNC_ENABLED, False)
-                and not user_input.get(CONF_HISTORY_ENABLED, False)
+                and not history_enabled
             ):
                 errors["base"] = "history_required_for_cloud_sync"
+            elif (
+                user_input.get(CONF_LOCAL_CAPTURE_ENABLED, False)
+                and not history_enabled
+            ):
+                errors["base"] = "history_required_for_local_capture"
             else:
                 return self.async_create_entry(title="", data=user_input)
 

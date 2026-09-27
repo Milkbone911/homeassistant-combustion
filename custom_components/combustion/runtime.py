@@ -14,6 +14,11 @@ from .bluetooth_listener import BluetoothListener
 from .cloud.ha import CloudLinkHealth
 from .connection_manager import ConnectionManager
 from .control_manager import ControlManager
+from .local_capture import (
+    LocalCaptureHealth,
+    LocalCaptureStatus,
+    LocalCaptureSupervisor,
+)
 from .prediction_manager import PredictionManager
 from .probe_manager import ProbeManager
 from .reconciliation.sync import CloudSyncSupervisor, SyncHealth
@@ -42,9 +47,13 @@ class CombustionRuntime:
     cloud_health: CloudLinkHealth = field(default_factory=CloudLinkHealth)
     archive_health: ArchiveHealth = field(default_factory=ArchiveHealth)
     sync_health: SyncHealth = field(default_factory=SyncHealth)
+    local_capture_health: LocalCaptureHealth = field(default_factory=LocalCaptureHealth)
     archive_database: ArchiveDatabase | None = field(default=None, repr=False)
     archive_repository: ArchiveRepository | None = field(default=None, repr=False)
     sync_supervisor: CloudSyncSupervisor | None = field(default=None, repr=False)
+    local_capture_supervisor: LocalCaptureSupervisor | None = field(
+        default=None, repr=False
+    )
     _optional_tasks: set[asyncio.Task[Any]] = field(
         default_factory=set, init=False, repr=False
     )
@@ -93,6 +102,14 @@ class CombustionRuntime:
         if self._stopped:
             return
         self._stopping = True
+
+        capture = self.local_capture_supervisor
+        if capture is not None:
+            try:
+                await capture.async_stop()
+            except Exception:  # noqa: BLE001 - optional capture must not block unload
+                self.local_capture_health.status = LocalCaptureStatus.DEGRADED
+                self.local_capture_health.last_error_category = "shutdown"
 
         database = self.archive_database
         if database is not None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import sqlite3
 import threading
 from pathlib import Path
@@ -19,6 +20,7 @@ from custom_components.combustion.storage.database import (
     ArchiveStatus,
     sqlite_wal_fix_qualified,
 )
+from custom_components.combustion.storage.schema import install_schema_v1
 
 
 @pytest.mark.asyncio
@@ -28,7 +30,8 @@ async def test_archive_create_reopen_and_identity_binding(tmp_path: Path):
     db = ArchiveDatabase(path, require_qualified_wal=False)
     metadata = await db.async_start(allow_create=True)
 
-    assert metadata.schema_version == 1
+    assert metadata.schema_version == 2
+    assert metadata.database_generation == 2
     assert db.binding_path.is_file()
     assert path.is_file()
     assert path.stat().st_mode & 0o777 == 0o600
@@ -45,6 +48,115 @@ async def test_archive_create_reopen_and_identity_binding(tmp_path: Path):
     assert again.archive_id == metadata.archive_id
     assert again.path_binding_hash == metadata.path_binding_hash
     await reopened.async_stop()
+
+
+@pytest.mark.asyncio
+async def test_v1_archive_migrates_to_v2_without_changing_identity_or_cloud_rows(
+    tmp_path: Path,
+):
+    """S4 forward migration preserves an identity-qualified S3 archive."""
+    path = tmp_path / "combustion" / "archive.sqlite3"
+    path.parent.mkdir(parents=True)
+    archive_id = "11111111-2222-3333-4444-555555555555"
+    binding_hash = hashlib.sha256(
+        (archive_id + "\0" + os.path.abspath(path)).encode()
+    ).hexdigest()
+
+    conn = sqlite3.connect(path, isolation_level=None)
+    legacy = install_schema_v1(
+        conn,
+        archive_id=archive_id,
+        application_fingerprint="s3-fixture",
+        path_binding_hash=binding_hash,
+    )
+    assert legacy.schema_version == 1
+    assert legacy.database_generation == 1
+
+    now = 1_790_000_000_000_000
+    conn.execute(
+        """
+        INSERT INTO accounts(
+            account_id,provider,project,subject_ref,created_at_us,archived
+        ) VALUES('acct','firebase','combustion-production-apps','subject',?,0)
+        """,
+        (now,),
+    )
+    conn.execute(
+        """
+        INSERT INTO source_devices(
+            source_device_id,account_id,source_kind,provider_type,raw_serial,
+            source_key,provider_locator,first_seen_us,last_seen_us
+        ) VALUES('src','acct','cloud_probe',1,'serial','cloud-probe:serial',
+            'locator',?,?)
+        """,
+        (now, now),
+    )
+    conn.execute(
+        """
+        INSERT INTO cloud_sessions(
+            session_id,source_device_id,source_session_token,index_id,
+            first_seen_us,last_seen_us,identity_state
+        ) VALUES('session','src','42',NULL,?,?,'source_only')
+        """,
+        (now, now),
+    )
+    conn.close()
+
+    binding = path.with_name("archive.binding.json")
+    binding.write_text(
+        json.dumps(
+            {
+                "binding_version": 1,
+                "archive_id": archive_id,
+                "database_path": str(path),
+                "path_binding_hash": binding_hash,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    )
+    os.chmod(binding, 0o600)
+
+    db = ArchiveDatabase(
+        path,
+        require_qualified_wal=False,
+        application_fingerprint="s4-test",
+    )
+    migrated = await db.async_start(allow_create=False)
+
+    assert migrated.archive_id == archive_id
+    assert migrated.schema_version == 2
+    assert migrated.minimum_reader_version == 2
+    assert migrated.database_generation == 2
+    assert migrated.path_binding_hash == binding_hash
+
+    preserved = await db.async_read(
+        lambda read: (
+            read.execute("SELECT COUNT(*) FROM accounts").fetchone()[0],
+            read.execute("SELECT COUNT(*) FROM source_devices").fetchone()[0],
+            read.execute("SELECT COUNT(*) FROM cloud_sessions").fetchone()[0],
+            read.execute(
+                "SELECT version FROM schema_migrations ORDER BY version"
+            ).fetchall(),
+            read.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='table' AND name IN "
+                "('local_sources','local_capture_runs','local_observations',"
+                "'local_capture_gaps') ORDER BY name"
+            ).fetchall(),
+        )
+    )
+    assert preserved[:3] == (1, 1, 1)
+    assert preserved[3] == [(1,), (2,)]
+    assert preserved[4] == [
+        ("local_capture_gaps",),
+        ("local_capture_runs",),
+        ("local_observations",),
+        ("local_sources",),
+    ]
+
+    await db.async_stop()
 
 
 @pytest.mark.asyncio
@@ -191,7 +303,7 @@ async def test_consistent_backup_reopens_and_validates_semantics(tmp_path: Path)
 
     validated = ArchiveDatabase.validate_backup_sync(destination, manifest)
     assert validated["archive_id"] == metadata.archive_id
-    assert validated["schema_version"] == 1
+    assert validated["schema_version"] == 2
 
     await db.async_stop()
 
