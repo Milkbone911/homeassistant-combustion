@@ -145,6 +145,7 @@ class ArchiveDatabase:
         self,
         path: Path,
         *,
+        binding_path: Path | None = None,
         health: ArchiveHealth | None = None,
         application_fingerprint: str = "unknown",
         require_qualified_wal: bool = True,
@@ -154,7 +155,13 @@ class ArchiveDatabase:
         if not 1 <= reader_limit <= 2:
             raise ValueError("reader_limit must be between 1 and 2")
         self.path = Path(os.path.abspath(path))
-        self.binding_path = self.path.with_name("archive.binding.json")
+        self.binding_path = Path(
+            os.path.abspath(
+                binding_path
+                if binding_path is not None
+                else self.path.with_name("archive.binding.json")
+            )
+        )
         self.health = health or ArchiveHealth()
         self.application_fingerprint = application_fingerprint
         self.require_qualified_wal = require_qualified_wal
@@ -276,7 +283,8 @@ class ArchiveDatabase:
             "path_binding_hash": binding_hash,
         }
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.binding_path.with_suffix(".json.tmp")
+        self.binding_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.binding_path.with_suffix(self.binding_path.suffix + ".tmp")
         if tmp.exists():
             raise ArchiveIdentityError("Incomplete archive binding already exists")
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
@@ -293,7 +301,7 @@ class ArchiveDatabase:
             raise
         os.replace(tmp, self.binding_path)
         _fsync_file(self.binding_path)
-        _fsync_dir(self.path.parent)
+        _fsync_dir(self.binding_path.parent)
         return binding_hash
 
     def _validate_binding(self, metadata: ArchiveMetadata) -> None:
