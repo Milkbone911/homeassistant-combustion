@@ -272,8 +272,9 @@ async def test_before_commit_failure_advances_no_progress(tmp_path: Path):
         if point == "before_commit":
             raise RuntimeError("synthetic pre-commit crash")
 
+    clean = ArchiveRepository(db)
+    account_id, _, work = await _prepare_sample_work(clean)
     repo = ArchiveRepository(db, fault_injector=fault)
-    account_id, _, work = await _prepare_sample_work(repo)
 
     with pytest.raises(RuntimeError, match="pre-commit"):
         await repo.async_commit_sample_work(work, [_row(0), _row(1), _row(2)])
@@ -290,8 +291,7 @@ async def test_before_commit_failure_advances_no_progress(tmp_path: Path):
     )
     assert state == (0, 0, 0, "running")
 
-    assert await repo.async_recover_interrupted_work() == 1
-    clean = ArchiveRepository(db)
+    assert await clean.async_recover_interrupted_work() == 1
     retry = await clean.async_claim_work(
         account_id=account_id, now_us=utc_now_us() + 1
     )
@@ -310,13 +310,13 @@ async def test_after_commit_lost_ack_is_safe_to_retry(tmp_path: Path):
         if point == "after_commit":
             raise RuntimeError("synthetic lost acknowledgment")
 
+    clean = ArchiveRepository(db)
+    _, _, work = await _prepare_sample_work(clean)
     repo = ArchiveRepository(db, fault_injector=fault)
-    _, _, work = await _prepare_sample_work(repo)
 
     with pytest.raises(RuntimeError, match="lost acknowledgment"):
         await repo.async_commit_sample_work(work, [_row(0), _row(1), _row(2)])
 
-    clean = ArchiveRepository(db)
     state = await db.async_read(
         lambda conn: (
             conn.execute("SELECT COUNT(*) FROM cloud_samples").fetchone()[0],
@@ -396,7 +396,7 @@ async def test_changed_same_key_payload_is_versioned_not_overwritten(
 
     audit = await repo.async_claim_work(
         account_id=account_id,
-        now_us=utc_now_us() + MANIFEST_RECHECK_US + 1,
+        now_us=utc_now_us() + 1,
     )
     assert audit is not None
     assert audit.kind == "audit"
