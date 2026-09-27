@@ -89,6 +89,7 @@ class LocalCaptureSupervisor:
         prediction_manager: PredictionManager,
         health: LocalCaptureHealth,
     ) -> None:
+        """Initialize one entry-owned local archive capture supervisor."""
         self.hass = hass
         self.entry = entry
         self.repository = repository
