@@ -20,10 +20,14 @@ from custom_components.combustion.storage.repository import (
 from custom_components.combustion.storage.schema import utc_now_us
 
 
-def _index(token: str = "123") -> SessionIndex:
+def _index(
+    token: str = "123",
+    *,
+    sample_period_ms: int = 5000,
+) -> SessionIndex:
     raw = {
         "device_session_id": int(token),
-        "sample_period": 5000,
+        "sample_period": sample_period_ms,
         "sequence_number_ranges": [[0, 2]],
     }
     return SessionIndex(
@@ -32,7 +36,7 @@ def _index(token: str = "123") -> SessionIndex:
         serial="probe-a",
         uid=None,
         device_type=1,
-        sample_period_ms=5000,
+        sample_period_ms=sample_period_ms,
         started_at="2026-01-01T00:00:00Z",
         ended_at=None,
         advertised_ranges=((0, 2),),
@@ -70,6 +74,7 @@ async def _prepare_manifest_work(
     repo: ArchiveRepository,
     *,
     token: str = "123",
+    sample_period_ms: int = 5000,
 ):
     account_id, sources = await repo.async_register_account(
         "private-subject-do-not-store-raw",
@@ -86,7 +91,9 @@ async def _prepare_manifest_work(
         requested_page=1,
         returned_page=1,
         total_pages=1,
-        sessions=(_index(token),),
+        sessions=(
+            _index(token, sample_period_ms=sample_period_ms),
+        ),
     )
     await repo.async_record_discovery_page(
         run_id=run,
@@ -112,8 +119,14 @@ async def _prepare_sample_work(
     repo: ArchiveRepository,
     *,
     ranges=((0, 2),),
+    token: str = "123",
+    sample_period_ms: int = 5000,
 ):
-    account_id, manifest_work = await _prepare_manifest_work(repo)
+    account_id, manifest_work = await _prepare_manifest_work(
+        repo,
+        token=token,
+        sample_period_ms=sample_period_ms,
+    )
     meta = SessionMeta(
         started_at="2026-01-01T00:00:00Z",
         ranges=ranges,
@@ -530,4 +543,143 @@ async def test_work_claims_are_isolated_by_account_namespace(tmp_path: Path):
         is None
     )
     assert old_work.account_id == old_account
+    await db.async_stop()
+
+
+@pytest.mark.asyncio
+async def test_recorder_source_summary_and_weighted_hourly_temperature_stats(
+    tmp_path: Path,
+):
+    """Recorder projection uses selected cloud rows and sample-period weighting."""
+    db = await _database(tmp_path)
+    repo = ArchiveRepository(db)
+
+    _account, _manifest, work_a = await _prepare_sample_work(
+        repo,
+        ranges=((0, 1),),
+        token="recorder-a",
+        sample_period_ms=1000,
+    )
+    await repo.async_commit_sample_work(
+        work_a,
+        [_row(0, t1=10.0), _row(1, t1=20.0)],
+    )
+
+    _account, _manifest, work_b = await _prepare_sample_work(
+        repo,
+        ranges=((0, 0),),
+        token="recorder-b",
+        sample_period_ms=3000,
+    )
+    await repo.async_commit_sample_work(
+        work_b,
+        [_row(0, t1=30.0)],
+    )
+
+    summaries = await repo.async_recorder_source_summaries()
+    assert len(summaries) == 1
+    summary = summaries[0]
+    assert summary["session_count"] == 2
+    assert summary["sample_count"] == 3
+    assert summary["conflict_count"] == 0
+    assert summary["missing_timestamp_count"] == 0
+    assert summary["sessions_missing_period_count"] == 0
+    assert summary["open_gap_count"] == 0
+    assert "raw_serial" not in summary
+    assert "provider_locator" not in summary
+
+    result = await repo.async_recorder_hourly_temperature_statistics(
+        summary["source_device_id"],
+        ("t1",),
+    )
+    assert list(result) == ["t1"]
+    assert len(result["t1"]) == 1
+    hour = result["t1"][0]
+    assert hour["min"] == 10.0
+    assert hour["max"] == 30.0
+    assert hour["mean"] == pytest.approx(24.0)
+    assert hour["sample_count"] == 3
+
+    await db.async_stop()
+
+
+@pytest.mark.asyncio
+async def test_recorder_hourly_projection_refuses_incomplete_source(
+    tmp_path: Path,
+):
+    """Open source gaps prevent a falsely complete Recorder backfill."""
+    db = await _database(tmp_path)
+    repo = ArchiveRepository(db)
+    _account, _manifest, work = await _prepare_sample_work(
+        repo,
+        ranges=((0, 2),),
+        token="recorder-gap",
+    )
+    await repo.async_commit_sample_work(
+        work,
+        [_row(0, t1=10.0), _row(2, t1=30.0)],
+    )
+    summary = (await repo.async_recorder_source_summaries())[0]
+    assert summary["open_gap_count"] == 1
+
+    with pytest.raises(ValueError, match="unresolved"):
+        await repo.async_recorder_hourly_temperature_statistics(
+            summary["source_device_id"],
+            ("t1",),
+        )
+
+    await db.async_stop()
+
+
+@pytest.mark.asyncio
+async def test_recorder_hourly_projection_rejects_conflicts_and_bad_fields(
+    tmp_path: Path,
+):
+    """Conflicts and unsupported entity metrics never silently enter Recorder."""
+    db = await _database(tmp_path)
+    repo = ArchiveRepository(db)
+    account_id, manifest, work = await _prepare_sample_work(
+        repo,
+        ranges=((0, 0),),
+        token="recorder-conflict",
+    )
+    await repo.async_commit_sample_work(work, [_row(0, t1=20.0)])
+
+    manifest_work = await repo.async_claim_work(
+        account_id=account_id,
+        now_us=utc_now_us() + MANIFEST_RECHECK_US + 1,
+    )
+    assert manifest_work is not None and manifest_work.kind == "manifest"
+    await repo.async_complete_manifest(
+        manifest_work,
+        SessionMeta(
+            "2026-01-01T00:00:00Z",
+            ((0, 0),),
+            {
+                "started_at": "2026-01-01T00:00:00Z",
+                "sequence_number_ranges": [[0, 0]],
+            },
+        ),
+    )
+    audit = await repo.async_claim_work(
+        account_id=account_id,
+        now_us=utc_now_us() + 1,
+    )
+    assert audit is not None and audit.kind == "audit"
+    assert audit.manifest_id == manifest.manifest_id
+    await repo.async_commit_sample_work(audit, [_row(0, t1=21.0)])
+
+    summary = (await repo.async_recorder_source_summaries())[0]
+    assert summary["conflict_count"] == 1
+    with pytest.raises(ValueError, match="unresolved"):
+        await repo.async_recorder_hourly_temperature_statistics(
+            summary["source_device_id"],
+            ("t1",),
+        )
+    with pytest.raises(ValueError, match="Unsupported"):
+        await repo.async_recorder_hourly_temperature_statistics(
+            summary["source_device_id"],
+            ("prediction_state",),
+        )
+
     await db.async_stop()
