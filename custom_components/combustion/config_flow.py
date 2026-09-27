@@ -392,9 +392,6 @@ class CombustionOptionsFlowHandler(config_entries.OptionsFlowWithReload):
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.FlowResult:
         """Manage the options."""
-        if user_input is not None:
-            return self.async_create_entry(title="", data=user_input)
-
         options = self.config_entry.options
         schema = vol.Schema(
             {
@@ -433,4 +430,19 @@ class CombustionOptionsFlowHandler(config_entries.OptionsFlowWithReload):
                 ): bool,
             }
         )
-        return self.async_show_form(step_id="init", data_schema=schema)
+
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            if (
+                user_input.get(CONF_CLOUD_SYNC_ENABLED, False)
+                and not user_input.get(CONF_HISTORY_ENABLED, False)
+            ):
+                errors["base"] = "history_required_for_cloud_sync"
+            else:
+                return self.async_create_entry(title="", data=user_input)
+
+        return self.async_show_form(
+            step_id="init",
+            data_schema=schema,
+            errors=errors,
+        )
