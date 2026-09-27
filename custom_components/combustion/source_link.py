@@ -117,6 +117,17 @@ class SourceLinkRepository:
                         unresolved += 1
                         continue
                     if len(candidates) != 1:
+                        if source_id in active_rows:
+                            conn.execute(
+                                """
+                                UPDATE identity_links
+                                SET ended_at_us=?,end_reason='ambiguous_exact_serial'
+                                WHERE source_device_id=? AND ended_at_us IS NULL
+                                """,
+                                (now, source_id),
+                            )
+                            active_rows.pop(source_id, None)
+                            superseded += 1
                         ambiguous += 1
                         continue
 
