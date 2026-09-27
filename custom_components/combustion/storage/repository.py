@@ -47,6 +47,7 @@ class SyncWork:
     start_seq: int | None
     end_seq: int | None
     attempts: int
+    account_id: str
     source_device_id: str
     serial: str
     provider_locator: str
@@ -360,16 +361,22 @@ class ArchiveRepository:
         return await self.database.async_write(write)
 
     async def async_discovery_due(
-        self, account_id: str, *, now_us: int, interval_us: int
+        self,
+        account_id: str,
+        source_device_id: str,
+        *,
+        now_us: int,
+        interval_us: int,
     ) -> bool:
-        """Check only the latest discovery receipt, not whole history."""
+        """Check the latest discovery receipt for one source device."""
         def read(conn: sqlite3.Connection) -> bool:
             row = conn.execute(
                 """
                 SELECT MAX(started_at_us) FROM discovery_runs
-                WHERE account_id=? AND terminal_status='complete'
+                WHERE account_id=? AND source_device_id=?
+                  AND terminal_status='complete'
                 """,
-                (account_id,),
+                (account_id, source_device_id),
             ).fetchone()
             return row[0] is None or int(row[0]) + interval_us <= now_us
 
@@ -498,24 +505,27 @@ class ArchiveRepository:
 
         return await self.database.async_write(write)
 
-    async def async_claim_work(self, *, now_us: int) -> SyncWork | None:
-        """Claim exactly one due unit; claim state is durable but not progress."""
+    async def async_claim_work(
+        self, *, account_id: str, now_us: int
+    ) -> SyncWork | None:
+        """Claim exactly one due unit for the active account namespace."""
         def write(conn: sqlite3.Connection) -> SyncWork | None:
             with _tx(conn):
                 row = conn.execute(
                     """
                     SELECT
                         w.work_id,w.kind,w.session_id,w.manifest_id,w.start_seq,w.end_seq,
-                        w.attempts,s.source_device_id,d.raw_serial,d.provider_locator,
-                        s.source_session_token
+                        w.attempts,d.account_id,s.source_device_id,d.raw_serial,
+                        d.provider_locator,s.source_session_token
                     FROM sync_work AS w
                     JOIN cloud_sessions AS s ON s.session_id=w.session_id
                     JOIN source_devices AS d ON d.source_device_id=s.source_device_id
                     WHERE w.state='ready' AND w.not_before_us<=?
+                      AND d.account_id=?
                     ORDER BY w.priority ASC,w.not_before_us ASC,w.created_at_us ASC
                     LIMIT 1
                     """,
-                    (now_us,),
+                    (now_us, account_id),
                 ).fetchone()
                 if row is None:
                     return None
@@ -540,6 +550,7 @@ class ArchiveRepository:
                     str(row[8]),
                     str(row[9]),
                     str(row[10]),
+                    str(row[11]),
                 )
 
         return await self.database.async_write(write)
