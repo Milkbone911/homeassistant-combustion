@@ -70,6 +70,7 @@ class PredictionManager:
         self._listeners = []
         self._observation_listeners = []
         self._known: set[str] = set()
+        self._status_serials: set[str] = set()
 
     def init_sensor_platform(self, create_sensors_callback):
         """Register the callback used to add prediction entities."""
@@ -94,6 +95,7 @@ class PredictionManager:
         self._expiry_handles.clear()
         self._listeners.clear()
         self._observation_listeners.clear()
+        self._status_serials.clear()
 
     def add_update_listener(self, listener):
         """Add listener to be notified of prediction-current-state updates.
@@ -180,14 +182,14 @@ class PredictionManager:
     @callback
     def _on_connection_change(self) -> None:
         """Invalidate current predictions immediately when a GATT link drops."""
-        for serial in tuple(self.data):
+        for serial in tuple(self._status_serials):
             if not self.connection_manager.is_connected(serial):
                 handle = self._expiry_handles.pop(serial, None)
                 if handle is not None:
                     handle.cancel()
                 # Disconnect is a hard current-fitness boundary. Retain the
                 # parsed value in data for future historical capture, but a
-                # reconnect must receive a new status notification before the
+                # reconnect must receive a new qualified Normal status before
                 # prediction can become current again.
                 self._last_received.pop(serial, None)
                 self.probe_manager.clear_status_mode(serial)
@@ -199,6 +201,7 @@ class PredictionManager:
             return
 
         received_at = time.monotonic()
+        self._status_serials.add(serial)
         mode = ModeId.from_byte(data[21]).mode
         self.probe_manager.update_status_mode(serial, mode, received_at)
 
