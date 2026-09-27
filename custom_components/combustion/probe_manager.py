@@ -78,6 +78,9 @@ class ProbeManager:
         self._mode_seen: dict[str, dict[ProbeMode, float]] = {}
         self._status_mode_seen: dict[str, dict[ProbeMode, float]] = {}
         self._projected_mode_name: dict[str, str | None] = {}
+        self._received_observations = 0
+        self._selected_observations = 0
+        self._suppressed_repeater_observations = 0
 
     def init_sensor_platform(self, create_sensors_callback):
         """Initialize sensor platform."""
@@ -147,6 +150,7 @@ class ProbeManager:
             """Handle one parsed HA-delivered Combustion observation."""
             device_data = observation.device_data
             serial = device_data.serial_number
+            self._received_observations += 1
             # Live selection/throttle state keeps its established local clock;
             # the envelope's earlier receipt timestamp is preserved separately
             # for future archival provenance.
@@ -167,6 +171,7 @@ class ProbeManager:
                     last_direct is not None
                     and now - last_direct < DIRECT_DATA_PREFERENCE_SECONDS
                 ):
+                    self._suppressed_repeater_observations += 1
                     return
 
             self._latest_observation[serial] = observation
@@ -178,6 +183,7 @@ class ProbeManager:
             # S2 capture seam: synchronous/non-awaiting and failure-isolated.
             # S4 can attach a bounded queue offer here without coupling capture
             # to successful entity creation or notification.
+            self._selected_observations += 1
             self._offer_selected_observation(observation)
 
             # Entity/platform failure must not stop selected observation fan-out.
@@ -230,6 +236,15 @@ class ProbeManager:
                 listener(observation)
             except Exception:  # noqa: BLE001
                 _LOGGER.exception("Selected observation listener failed")
+
+    @property
+    def observation_counters(self) -> dict[str, int]:
+        """Return sanitized reception/selection evidence counters."""
+        return {
+            "received": self._received_observations,
+            "selected": self._selected_observations,
+            "suppressed_repeater": self._suppressed_repeater_observations,
+        }
 
     def add_observation_listener(self, listener):
         """Register a synchronous selected-observation consumer.
