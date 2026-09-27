@@ -338,10 +338,10 @@ def _prediction_status_packet(mode: ProbeMode = ProbeMode.normal) -> bytes:
     return bytes(prefix) + bytes([d0, d1, d2, d3, d4, d5, d6])
 
 
-def test_fresh_gatt_status_mode_overrides_ambiguous_advertisements(
+def test_gatt_mode_evidence_does_not_turn_interleaved_streams_into_flapping(
     hass: HomeAssistant,
 ):
-    """The existing Probe Status subscription supplies stronger current-mode evidence."""
+    """Status packets remain independent evidence rather than latest-packet truth."""
     probe_manager = ProbeManager(bt_listener=None)
     probe_manager.init_sensor_platform(lambda _manager, _data: None)
     probe_manager.init_binary_sensor_platform(lambda _manager, _data: None)
@@ -366,6 +366,7 @@ def test_fresh_gatt_status_mode_overrides_ambiguous_advertisements(
         update(instant)
         assert probe_manager.current_mode_name("abc123") == "unknown"
 
+        # A Normal status packet cannot erase the fresh Instant-Read evidence.
         with patch(
             "custom_components.combustion.prediction_manager.time.monotonic",
             return_value=101.5,
@@ -374,13 +375,70 @@ def test_fresh_gatt_status_mode_overrides_ambiguous_advertisements(
                 "abc123", _prediction_status_packet(ProbeMode.normal)
             )
         monotonic.return_value = 101.5
+        assert probe_manager.current_mode_name("abc123") == "unknown"
+
+        # Once the conflicting advertisement evidence ages out, continuing
+        # Normal status evidence can truthfully resolve the projection.
+        monotonic.return_value = 107.0
+        with patch(
+            "custom_components.combustion.prediction_manager.time.monotonic",
+            return_value=107.0,
+        ):
+            connection.subscriptions[PROBE_STATUS_CHAR](
+                "abc123", _prediction_status_packet(ProbeMode.normal)
+            )
         assert probe_manager.current_mode_name("abc123") == "normal"
+
+        # Interleaved Instant-Read status is again ambiguity, not a transition.
+        with patch(
+            "custom_components.combustion.prediction_manager.time.monotonic",
+            return_value=108.0,
+        ):
+            connection.subscriptions[PROBE_STATUS_CHAR](
+                "abc123", _prediction_status_packet(ProbeMode.instantRead)
+            )
+        monotonic.return_value = 108.0
+        assert probe_manager.current_mode_name("abc123") == "unknown"
 
         connection.connected.remove("abc123")
         connection.fire_connection_change()
-        assert probe_manager.current_mode_name("abc123") == "unknown"
+        assert probe_manager.current_mode_name("abc123") is None
 
     prediction_manager.async_unload()
+
+
+def test_instant_read_status_does_not_overwrite_prediction_state(
+    hass: HomeAssistant,
+):
+    """Prediction follows vendor behavior: only Normal Probe Status updates it."""
+    entry = MagicMock()
+    entry.async_on_unload = MagicMock()
+    connection = _FakeConnectionManager()
+    connection.connected.add("abc123")
+    probe_manager = MagicMock()
+    manager = PredictionManager(hass, entry, connection, probe_manager)
+
+    observations = []
+    manager.add_observation_listener(observations.append)
+    manager.async_init()
+
+    connection.subscriptions[PROBE_STATUS_CHAR](
+        "abc123", _prediction_status_packet(ProbeMode.normal)
+    )
+    first = manager.prediction("abc123")
+    assert first is not None
+    assert first.state == "predicting"
+    assert len(observations) == 1
+
+    # The bytes in this fixture still contain a prediction-shaped field, but
+    # Instant-Read status must not reinterpret it as current prediction data.
+    connection.subscriptions[PROBE_STATUS_CHAR](
+        "abc123", _prediction_status_packet(ProbeMode.instantRead)
+    )
+
+    assert manager.prediction("abc123") is first
+    assert len(observations) == 1
+    manager.async_unload()
 
 
 @pytest.mark.asyncio
