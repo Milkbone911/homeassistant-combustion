@@ -70,6 +70,12 @@ async def test_archive_backup_websocket_uses_fixed_internal_directory(
     class FakeDatabase:
         path = archive_path
 
+        def stop_accepting(self) -> None:
+            pass
+
+        async def async_stop(self) -> None:
+            pass
+
         async def async_backup(self, destination: Path):
             assert destination.parent == archive_path.parent / "backups"
             assert destination.name.startswith("archive-")
