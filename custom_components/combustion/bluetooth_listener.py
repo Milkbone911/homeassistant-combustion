@@ -43,6 +43,8 @@ class BluetoothObservation:
     upstream_time: float | None
     connectable: bool | None
     received_at_epoch: float | None = None
+    upstream_age_seconds: float | None = None
+    manufacturer_payload_hex: str | None = None
 
 
 def parse_advertisement(service_info: BluetoothServiceInfoBleak):
@@ -163,15 +165,33 @@ class BluetoothListener:
         if type(connectable) is not bool:
             connectable = None
 
+        received_at_monotonic = time.monotonic()
+        upstream_age_seconds = None
+        if upstream_time is not None:
+            age = received_at_monotonic - upstream_time
+            # HA/habluetooth stamps service_info.time with advertisement
+            # monotonic time. Retain its age rather than treating this callback
+            # as proof that a restored/cached advertisement is freshly measured.
+            if age >= 0:
+                upstream_age_seconds = age
+
+        payload = service_info.manufacturer_data.get(BT_MANUFACTURER_ID)
+        manufacturer_payload_hex = (
+            bytes(payload).hex()
+            if isinstance(payload, bytes | bytearray | memoryview)
+            else None
+        )
         observation = BluetoothObservation(
             device_data=device_data,
-            received_at_monotonic=time.monotonic(),
+            received_at_monotonic=received_at_monotonic,
             source_address=str(getattr(service_info, "address", "")),
             scanner_source=source,
             rssi=rssi,
             upstream_time=upstream_time,
             connectable=connectable,
             received_at_epoch=time.time(),
+            upstream_age_seconds=upstream_age_seconds,
+            manufacturer_payload_hex=manufacturer_payload_hex,
         )
 
         # Fan-out is failure-independent. A future archive queue offer must not
