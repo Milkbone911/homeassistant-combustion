@@ -38,11 +38,15 @@ from .const import (
     CONF_CLOUD_LINK_GENERATION,
     CONF_CLOUD_REFRESH_TOKEN,
     CONF_CLOUD_SUBJECT,
+    CONF_CLOUD_SYNC_ENABLED,
     CONF_DEVICES,
     CONF_ENABLE_ACTIVE_CONNECTION,
+    CONF_HISTORY_ENABLED,
     CONF_UPDATE_THROTTLE,
     DEFAULT_AVAILABILITY_TIMEOUT,
+    DEFAULT_CLOUD_SYNC_ENABLED,
     DEFAULT_ENABLE_ACTIVE_CONNECTION,
+    DEFAULT_HISTORY_ENABLED,
     DEFAULT_UPDATE_THROTTLE,
     DOMAIN,
     LOGGER,
@@ -388,9 +392,6 @@ class CombustionOptionsFlowHandler(config_entries.OptionsFlowWithReload):
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.FlowResult:
         """Manage the options."""
-        if user_input is not None:
-            return self.async_create_entry(title="", data=user_input)
-
         options = self.config_entry.options
         schema = vol.Schema(
             {
@@ -413,6 +414,35 @@ class CombustionOptionsFlowHandler(config_entries.OptionsFlowWithReload):
                         DEFAULT_ENABLE_ACTIVE_CONNECTION,
                     ),
                 ): bool,
+                vol.Optional(
+                    CONF_HISTORY_ENABLED,
+                    default=options.get(
+                        CONF_HISTORY_ENABLED,
+                        DEFAULT_HISTORY_ENABLED,
+                    ),
+                ): bool,
+                vol.Optional(
+                    CONF_CLOUD_SYNC_ENABLED,
+                    default=options.get(
+                        CONF_CLOUD_SYNC_ENABLED,
+                        DEFAULT_CLOUD_SYNC_ENABLED,
+                    ),
+                ): bool,
             }
         )
-        return self.async_show_form(step_id="init", data_schema=schema)
+
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            if (
+                user_input.get(CONF_CLOUD_SYNC_ENABLED, False)
+                and not user_input.get(CONF_HISTORY_ENABLED, False)
+            ):
+                errors["base"] = "history_required_for_cloud_sync"
+            else:
+                return self.async_create_entry(title="", data=user_input)
+
+        return self.async_show_form(
+            step_id="init",
+            data_schema=schema,
+            errors=errors,
+        )

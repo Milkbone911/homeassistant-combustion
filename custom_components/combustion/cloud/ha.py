@@ -81,6 +81,64 @@ def cloud_linked(data: dict[str, Any] | Any) -> bool:
         return False
 
 
+def linked_account_snapshot(entry: ConfigEntry) -> tuple[int, str]:
+    """Return one validated link-generation/subject snapshot."""
+    if not cloud_linked(entry.data):
+        raise CloudAuthError("Cloud account is not linked")
+    return (
+        int(entry.data[CONF_CLOUD_LINK_GENERATION]),
+        str(entry.data[CONF_CLOUD_SUBJECT]),
+    )
+
+
+def linked_account_matches(
+    entry: ConfigEntry, generation: int, subject: str
+) -> bool:
+    """Return whether awaited work still belongs to the active link."""
+    current = entry.data
+    try:
+        return (
+            int(current.get(CONF_CLOUD_LINK_GENERATION, 0)) == generation
+            and current.get(CONF_CLOUD_SUBJECT) == subject
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+def create_linked_cloud_client(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+) -> tuple[CombustionCloudClient, int, str]:
+    """Build the single client for one active linked-account runtime.
+
+    The returned client owns auth single-flight for that supervisor. Routine
+    refresh-token rotation persists only while the original link generation
+    and subject still match.
+    """
+    generation, expected_subject = linked_account_snapshot(entry)
+    data = entry.data
+
+    async def _persist_rotation(_old: str, new: str) -> None:
+        if not linked_account_matches(entry, generation, expected_subject):
+            raise CloudLinkChangedError("Cloud link changed during token refresh")
+        current = entry.data
+        if current.get(CONF_CLOUD_REFRESH_TOKEN) == new:
+            return
+        hass.config_entries.async_update_entry(
+            entry,
+            data={**current, CONF_CLOUD_REFRESH_TOKEN: new},
+        )
+
+    client = CombustionCloudClient(
+        session=async_get_clientsession(hass),
+        api_key=str(data[CONF_CLOUD_API_KEY]),
+        refresh_token=str(data[CONF_CLOUD_REFRESH_TOKEN]),
+        expected_subject=expected_subject,
+        on_rotation=_persist_rotation,
+    )
+    return client, generation, expected_subject
+
+
 async def async_validate_cloud_link(
     hass: HomeAssistant,
     *,
@@ -143,29 +201,9 @@ async def async_check_linked_account(
     health.error_category = None
     health.verified_generation = None
 
-    async def _persist_rotation(_old: str, new: str) -> None:
-        current = entry.data
-        if (
-            int(current.get(CONF_CLOUD_LINK_GENERATION, 0)) != generation
-            or current.get(CONF_CLOUD_SUBJECT) != expected_subject
-        ):
-            raise CloudLinkChangedError("Cloud link changed during token refresh")
-        if current.get(CONF_CLOUD_REFRESH_TOKEN) == new:
-            return
-        # S2a intentionally removed the entry update listener: routine token
-        # persistence must not reload BLE/GATT. HA schedules durable storage.
-        hass.config_entries.async_update_entry(
-            entry,
-            data={**current, CONF_CLOUD_REFRESH_TOKEN: new},
-        )
-
     try:
-        client = CombustionCloudClient(
-            session=async_get_clientsession(hass),
-            api_key=str(data[CONF_CLOUD_API_KEY]),
-            refresh_token=str(data[CONF_CLOUD_REFRESH_TOKEN]),
-            expected_subject=expected_subject,
-            on_rotation=_persist_rotation,
+        client, generation, expected_subject = create_linked_cloud_client(
+            hass, entry
         )
         probes = await client.probes()
     except CloudLinkChangedError:
@@ -192,11 +230,7 @@ async def async_check_linked_account(
 
     # Re-check generation after awaited I/O. A replaced/unlinked account must
     # never publish health for the stale account generation.
-    current = entry.data
-    if (
-        int(current.get(CONF_CLOUD_LINK_GENERATION, 0)) != generation
-        or current.get(CONF_CLOUD_SUBJECT) != expected_subject
-    ):
+    if not linked_account_matches(entry, generation, expected_subject):
         return
 
     health.status = CloudLinkStatus.READY

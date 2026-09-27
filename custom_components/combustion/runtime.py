@@ -1,12 +1,9 @@
-"""Typed runtime ownership for the Combustion config entry.
-
-S2a establishes lifecycle ownership without enabling cloud I/O, archive
-storage, or changing the existing BLE/GATT managers' behavior.
-"""
+"""Typed runtime ownership for one Combustion config entry."""
 from __future__ import annotations
 
 import asyncio
 from collections.abc import Coroutine
+from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -19,16 +16,22 @@ from .connection_manager import ConnectionManager
 from .control_manager import ControlManager
 from .prediction_manager import PredictionManager
 from .probe_manager import ProbeManager
+from .reconciliation.sync import CloudSyncSupervisor, SyncHealth
+from .storage.database import (
+    ArchiveDatabase,
+    ArchiveHealth,
+    ArchiveShutdownIncomplete,
+)
+from .storage.repository import ArchiveRepository
 
 
 @dataclass(slots=True)
 class CombustionRuntime:
     """Objects owned by one loaded Combustion config entry.
 
-    Existing entity platforms still consume the historical hass.data aliases
-    during S2. The typed runtime becomes the authoritative lifecycle owner and
-    gives later optional cloud/history supervisors one bounded, entry-owned
-    task seam.
+    Local BLE/GATT managers retain their established lifecycle callbacks.
+    Optional cloud/archive work is owned here so unload can stop intake,
+    cancel supervisors, and then close the thread-affine archive in order.
     """
 
     bluetooth_listener: BluetoothListener
@@ -37,6 +40,11 @@ class CombustionRuntime:
     prediction_manager: PredictionManager
     control_manager: ControlManager
     cloud_health: CloudLinkHealth = field(default_factory=CloudLinkHealth)
+    archive_health: ArchiveHealth = field(default_factory=ArchiveHealth)
+    sync_health: SyncHealth = field(default_factory=SyncHealth)
+    archive_database: ArchiveDatabase | None = field(default=None, repr=False)
+    archive_repository: ArchiveRepository | None = field(default=None, repr=False)
+    sync_supervisor: CloudSyncSupervisor | None = field(default=None, repr=False)
     _optional_tasks: set[asyncio.Task[Any]] = field(
         default_factory=set, init=False, repr=False
     )
@@ -65,12 +73,7 @@ class CombustionRuntime:
         coro: Coroutine[Any, Any, Any],
         name: str,
     ) -> asyncio.Task[Any]:
-        """Create and track entry-owned optional work.
-
-        The config entry remains Home Assistant's owner of the task. The
-        runtime additionally tracks it so optional subsystems can be drained
-        before later account replacement/archive shutdown work.
-        """
+        """Create and track entry-owned optional work."""
         if self._stopping or self._stopped:
             coro.close()
             raise RuntimeError("Combustion runtime is stopping")
@@ -80,19 +83,32 @@ class CombustionRuntime:
         return task
 
     async def async_stop(self) -> None:
-        """Idempotently stop only optional work owned by this runtime.
+        """Idempotently stop optional work before existing BLE/GATT cleanup.
 
-        BLE/GATT managers retain their existing entry.async_on_unload cleanup
-        callbacks. S2a deliberately does not duplicate or reorder those
-        manager shutdown contracts.
+        Refuse new archive work first, then cancel/drain supervisors, then
+        serialize writer checkpoint/close. A stuck writer is intentionally not
+        treated as stopped: its process-local path guard remains held so a
+        reload cannot open a second writer on the same archive.
         """
         if self._stopped:
             return
         self._stopping = True
+
+        database = self.archive_database
+        if database is not None:
+            database.stop_accepting()
+
         tasks = tuple(self._optional_tasks)
         for task in tasks:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._optional_tasks.clear()
+
+        if database is not None:
+            # Local unload remains possible if a filesystem thread is stuck;
+            # ArchiveDatabase deliberately retains its ownership guard.
+            with suppress(ArchiveShutdownIncomplete):
+                await database.async_stop()
+
         self._stopped = True
