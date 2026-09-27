@@ -3,7 +3,8 @@
   "name": "Combustion",
   "after_dependencies": [
     "http",
-    "frontend"
+    "frontend",
+    "recorder"
   ],
   "bluetooth": [
     {
