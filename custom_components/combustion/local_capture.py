@@ -118,25 +118,40 @@ class LocalCaptureSupervisor:
     async def async_start(self) -> None:
         """Recover stale runs, create a run, attach sinks, and start writer."""
         self.health.status = LocalCaptureStatus.STARTING
-        await self.repository.async_recover_interrupted_local_captures()
-        self.capture_run_id = await self.repository.async_begin_local_capture(
-            runtime_generation=self.runtime_generation,
-            policy_version=CAPTURE_POLICY_VERSION,
-            regular_interval_ms=int(REGULAR_INTERVAL_SECONDS * 1000),
-        )
-        self._remove_probe_listener = self.probe_manager.add_observation_listener(
-            self._on_ble_observation
-        )
-        self._remove_prediction_listener = (
-            self.prediction_manager.add_observation_listener(
-                self._on_prediction_observation
+        try:
+            await self.repository.async_recover_interrupted_local_captures()
+            self.capture_run_id = await self.repository.async_begin_local_capture(
+                runtime_generation=self.runtime_generation,
+                policy_version=CAPTURE_POLICY_VERSION,
+                regular_interval_ms=int(REGULAR_INTERVAL_SECONDS * 1000),
             )
-        )
-        self._task = self.entry.async_create_background_task(
-            self.hass,
-            self._async_writer(),
-            "combustion-local-history-capture",
-        )
+            self._remove_probe_listener = self.probe_manager.add_observation_listener(
+                self._on_ble_observation
+            )
+            self._remove_prediction_listener = (
+                self.prediction_manager.add_observation_listener(
+                    self._on_prediction_observation
+                )
+            )
+            self._task = self.entry.async_create_background_task(
+                self.hass,
+                self._async_writer(),
+                "combustion-local-history-capture",
+            )
+        except BaseException:
+            self._failed = True
+            self._detach_listeners()
+            if self.capture_run_id is not None:
+                try:
+                    await self.repository.async_finish_local_capture(
+                        self.capture_run_id,
+                        terminal_status="interrupted",
+                    )
+                except Exception:  # noqa: BLE001 - preserve original startup failure
+                    pass
+            self.health.status = LocalCaptureStatus.DEGRADED
+            self.health.last_error_category = "startup"
+            raise
         self.health.status = LocalCaptureStatus.READY
 
     @callback
@@ -224,6 +239,15 @@ class LocalCaptureSupervisor:
             if observation.received_at_epoch is not None
             else time.time()
         )
+        freshness_basis = (
+            "upstream_monotonic"
+            if observation.upstream_time is not None
+            else "callback_receipt"
+        )
+        provenance = {
+            "manufacturer_payload_hex": observation.manufacturer_payload_hex,
+            "upstream_age_seconds": observation.upstream_age_seconds,
+        }
 
         if isinstance(data, CombustionProbeData):
             serial = data.serial_number
@@ -232,6 +256,7 @@ class LocalCaptureSupervisor:
             mode_name = data.mode_name
             route = "meat_net" if data.via_repeater else "direct"
             payload: dict[str, Any] = {
+                **provenance,
                 "battery_ok": data.battery_ok,
                 "overheating": data.overheating,
                 "overheating_sensor_numbers": data.overheating_sensor_numbers,
@@ -269,7 +294,7 @@ class LocalCaptureSupervisor:
                     received_at_epoch=received_epoch,
                     received_at_monotonic=observation.received_at_monotonic,
                     route_kind=route,
-                    freshness_basis="callback_receipt",
+                    freshness_basis=freshness_basis,
                     valid_fields=tuple(valid),
                     payload=payload,
                     upstream_time=observation.upstream_time,
@@ -285,6 +310,7 @@ class LocalCaptureSupervisor:
         if isinstance(data, CombustionGaugeData):
             serial = data.serial_number
             payload = {
+                **provenance,
                 "t1": data.temperature,
                 "sensor_present": data.sensor_present,
                 "sensor_overheating": data.sensor_overheating,
@@ -318,7 +344,7 @@ class LocalCaptureSupervisor:
                     received_at_epoch=received_epoch,
                     received_at_monotonic=observation.received_at_monotonic,
                     route_kind="self",
-                    freshness_basis="callback_receipt",
+                    freshness_basis=freshness_basis,
                     valid_fields=valid,
                     payload=payload,
                     upstream_time=observation.upstream_time,
@@ -333,6 +359,7 @@ class LocalCaptureSupervisor:
         if isinstance(data, NodeData):
             serial = data.serial_number
             payload = {
+                **provenance,
                 "device_type": data.device_type,
                 "high_radio_power": data.high_radio_power,
             }
@@ -347,7 +374,7 @@ class LocalCaptureSupervisor:
                     received_at_epoch=received_epoch,
                     received_at_monotonic=observation.received_at_monotonic,
                     route_kind="self",
-                    freshness_basis="callback_receipt",
+                    freshness_basis=freshness_basis,
                     valid_fields=(),
                     payload=payload,
                     upstream_time=observation.upstream_time,
