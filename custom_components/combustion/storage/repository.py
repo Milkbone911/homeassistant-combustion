@@ -288,7 +288,7 @@ class ArchiveRepository:
         self._fault = fault_injector or (lambda _point: None)
 
     async def async_recover_interrupted_work(self) -> int:
-        """Return running work to ready after a process/reload interruption."""
+        """Recover abandoned claims/runs without inventing committed progress."""
         def write(conn: sqlite3.Connection) -> int:
             now = utc_now_us()
             with _tx(conn):
@@ -301,7 +301,18 @@ class ArchiveRepository:
                     """,
                     (now, now),
                 )
-                return int(cursor.rowcount)
+                recovered_work = int(cursor.rowcount)
+                conn.execute(
+                    """
+                    UPDATE discovery_runs
+                    SET terminal_status='partial',
+                        terminal_reason='interrupted',
+                        completed_at_us=?
+                    WHERE terminal_status='running'
+                    """,
+                    (now,),
+                )
+                return recovered_work
 
         return await self.database.async_write(write)
 
