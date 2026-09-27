@@ -331,6 +331,14 @@ class LocalCaptureSupervisor:
                 data.sensor_present,
                 data.sensor_overheating,
                 data.battery_ok,
+                data.high_alarm.is_set,
+                data.high_alarm.tripped,
+                data.high_alarm.alarming,
+                data.high_alarm.temperature,
+                data.low_alarm.is_set,
+                data.low_alarm.tripped,
+                data.low_alarm.alarming,
+                data.low_alarm.temperature,
             )
             is_regular = not self._signature_changed("gauge", serial, signature)
             valid = ("t1",) if data.temperature is not None else ()

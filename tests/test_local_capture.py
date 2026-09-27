@@ -12,6 +12,11 @@ from custom_components.combustion.bluetooth_listener import (
     BluetoothObservation,
     parse_advertisement,
 )
+from custom_components.combustion.combustion_ble.gauge_data import (
+    CombustionGaugeData,
+    GaugeAlarm,
+    GaugeData,
+)
 from custom_components.combustion.combustion_ble.mode_id import ProbeMode
 from custom_components.combustion.combustion_ble.prediction_data import PredictionData
 from custom_components.combustion.local_capture import (
@@ -121,6 +126,46 @@ def _probe_observation(
     )
 
 
+def _gauge_observation(
+    *,
+    high_alarm_tripped: bool,
+    monotonic: float,
+    epoch: float,
+) -> BluetoothObservation:
+    """Build one parsed gauge observation with controlled alarm status."""
+    alarm = GaugeAlarm(
+        is_set=True,
+        tripped=high_alarm_tripped,
+        alarming=high_alarm_tripped,
+        temperature=120.0,
+    )
+    data = CombustionGaugeData(
+        GaugeData(
+            serial_number="GAUGE-TEST",
+            sensor_present=True,
+            sensor_overheating=False,
+            battery_low=False,
+            temperature=100.0,
+            high_alarm=alarm,
+            low_alarm=GaugeAlarm(False, False, False, 0.0),
+        ),
+        rssi=-55,
+        address="AA:BB:CC:DD:EE:FF",
+    )
+    return BluetoothObservation(
+        device_data=data,
+        received_at_monotonic=monotonic,
+        source_address=data.address,
+        scanner_source="test-scanner",
+        rssi=data.rssi,
+        upstream_time=None,
+        connectable=False,
+        received_at_epoch=epoch,
+        upstream_age_seconds=None,
+        manufacturer_payload_hex=None,
+    )
+
+
 @pytest.mark.asyncio
 async def test_regular_policy_keeps_latest_pending_point_on_clean_stop(
     hass: HomeAssistant,
@@ -204,6 +249,67 @@ async def test_mode_transition_is_not_coalesced_with_regular_samples(
         ("regular", "normal", 22.0, 22.0),
         ("transition", "instant_read", 85.0, None),
     ]
+    await database.async_stop()
+
+
+@pytest.mark.asyncio
+async def test_gauge_alarm_change_is_preserved_as_transition(
+    hass: HomeAssistant,
+    tmp_path: Path,
+):
+    """Gauge alarm status changes bypass regular one-second coalescing."""
+    database, _repository, probes, _predictions, _health, supervisor = await _capture(
+        hass, tmp_path
+    )
+
+    probes.emit(
+        _gauge_observation(
+            high_alarm_tripped=False,
+            monotonic=250.00,
+            epoch=2_500.00,
+        )
+    )
+    probes.emit(
+        _gauge_observation(
+            high_alarm_tripped=False,
+            monotonic=250.01,
+            epoch=2_500.01,
+        )
+    )
+    probes.emit(
+        _gauge_observation(
+            high_alarm_tripped=False,
+            monotonic=250.02,
+            epoch=2_500.02,
+        )
+    )
+    probes.emit(
+        _gauge_observation(
+            high_alarm_tripped=True,
+            monotonic=250.03,
+            epoch=2_500.03,
+        )
+    )
+    await supervisor.async_stop()
+
+    rows = await database.async_read(
+        lambda conn: conn.execute(
+            """
+            SELECT capture_class,raw_json
+            FROM local_observations
+            ORDER BY event_ordinal
+            """
+        ).fetchall()
+    )
+    assert [row[0] for row in rows] == [
+        "transition",
+        "regular",
+        "regular",
+        "transition",
+    ]
+    retained = json.loads(rows[-1][1])
+    assert retained["payload"]["high_alarm"]["tripped"] is True
+    assert retained["payload"]["high_alarm"]["alarming"] is True
     await database.async_stop()
 
 
