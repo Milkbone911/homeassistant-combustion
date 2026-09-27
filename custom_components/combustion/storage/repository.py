@@ -1405,6 +1405,68 @@ class ArchiveRepository:
 
         return await self.database.async_write(write)
 
+    async def async_recover_interrupted_local_captures(self) -> int:
+        """Close stale local capture runs and retain an uncertain loss window."""
+        now = utc_now_us()
+
+        def write(conn: sqlite3.Connection) -> int:
+            rows = conn.execute(
+                """
+                SELECT capture_run_id,started_at_us
+                FROM local_capture_runs
+                WHERE terminal_status='running'
+                """
+            ).fetchall()
+            if not rows:
+                return 0
+            with _tx(conn):
+                for capture_run_id, started_at_us in rows:
+                    last = conn.execute(
+                        """
+                        SELECT MAX(received_at_us) FROM local_observations
+                        WHERE capture_run_id=?
+                        """,
+                        (capture_run_id,),
+                    ).fetchone()[0]
+                    first_uncertain = int(
+                        started_at_us if last is None else last
+                    )
+                    conn.execute(
+                        """
+                        UPDATE local_capture_runs
+                        SET ended_at_us=?,terminal_status='interrupted'
+                        WHERE capture_run_id=? AND terminal_status='running'
+                        """,
+                        (now, capture_run_id),
+                    )
+                    gap_id = str(
+                        uuid.uuid5(
+                            _LOCAL_CAPTURE_NS,
+                            f"{capture_run_id}:unclean-shutdown",
+                        )
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO local_capture_gaps(
+                            gap_id,capture_run_id,local_source_id,scope,reason,
+                            first_lost_at_us,last_lost_at_us,dropped_count,
+                            certainty,created_at_us
+                        ) VALUES(?,?,NULL,'capture_run','unclean_shutdown',
+                            ?,?,NULL,'uncertain',?)
+                        ON CONFLICT(gap_id) DO NOTHING
+                        """,
+                        (
+                            gap_id,
+                            capture_run_id,
+                            first_uncertain,
+                            now,
+                            now,
+                        ),
+                    )
+            return len(rows)
+
+        return await self.database.async_write(write)
+
     async def async_begin_local_capture(
         self,
         *,
