@@ -20,6 +20,8 @@ PRODUCT_TYPE_REPEATER_NODE = 2
 CONF_AVAILABILITY_TIMEOUT = "availability_timeout"
 CONF_UPDATE_THROTTLE = "update_throttle"
 CONF_ENABLE_ACTIVE_CONNECTION = "enable_active_connection"
+CONF_HISTORY_ENABLED = "history_enabled"
+CONF_CLOUD_SYNC_ENABLED = "cloud_sync_enabled"
 
 # Optional MeatNet Cloud link. These values stay in config-entry data, not
 # options: changing credentials/account identity is a reconfigure/reauth action.
@@ -32,3 +34,8 @@ CONF_CLOUD_LINK_GENERATION = "cloud_link_generation"
 DEFAULT_AVAILABILITY_TIMEOUT = 90
 DEFAULT_UPDATE_THROTTLE = 1.0
 DEFAULT_ENABLE_ACTIVE_CONNECTION = False
+DEFAULT_HISTORY_ENABLED = False
+DEFAULT_CLOUD_SYNC_ENABLED = False
+
+ARCHIVE_DIRECTORY = "combustion"
+ARCHIVE_FILENAME = "archive.sqlite3"
