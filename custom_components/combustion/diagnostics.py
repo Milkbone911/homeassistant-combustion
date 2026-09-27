@@ -23,6 +23,7 @@ async def async_get_config_entry_diagnostics(
         await database.async_refresh_sizes()
     sync = runtime.sync_health
     capture = runtime.local_capture_health
+    selection = runtime.probe_manager.observation_counters
     return {
         "cloud": {
             "linked": cloud_linked(entry.data),
@@ -62,6 +63,11 @@ async def async_get_config_entry_diagnostics(
             "coalesced_observations": capture.coalesced_observations,
             "last_commit_us": capture.last_commit_us,
             "last_error_category": capture.last_error_category,
+            "received_observations": selection["received"],
+            "selected_observations": selection["selected"],
+            "suppressed_repeater_observations": selection[
+                "suppressed_repeater"
+            ],
         },
         "local": {
             "active_connection_enabled": runtime.connection_manager.enabled,
