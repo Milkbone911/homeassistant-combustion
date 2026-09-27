@@ -124,7 +124,6 @@ class LocalCaptureSupervisor:
         """Recover stale runs, create a run, attach sinks, and start writer."""
         self.health.status = LocalCaptureStatus.STARTING
         try:
-            await self.repository.async_recover_interrupted_local_captures()
             self.capture_run_id = await self.repository.async_begin_local_capture(
                 runtime_generation=self.runtime_generation,
                 policy_version=CAPTURE_POLICY_VERSION,
@@ -138,8 +137,11 @@ class LocalCaptureSupervisor:
                     self._on_prediction_observation
                 )
             )
-            self._task = self.entry.async_create_background_task(
-                self.hass,
+            # This writer has an ordered, draining shutdown contract. Do not
+            # register it as an entry-owned background task: Home Assistant
+            # auto-cancels those during config-entry unload, which can race
+            # async_stop() before the run is durably marked clean.
+            self._task = self.hass.async_create_background_task(
                 self._async_writer(),
                 "combustion-local-history-capture",
             )
