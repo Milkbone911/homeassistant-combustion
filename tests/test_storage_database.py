@@ -187,6 +187,32 @@ def test_backup_hash_tamper_is_rejected(tmp_path: Path):
         ArchiveDatabase.validate_backup_sync(database, manifest)
 
 
+@pytest.mark.asyncio
+async def test_unqualified_runtime_uses_full_rollback_journal(
+    tmp_path: Path, monkeypatch
+):
+    """Unknown SQLite lines use DELETE journal instead of unqualified WAL."""
+    monkeypatch.setattr(
+        "custom_components.combustion.storage.database.sqlite_wal_fix_qualified",
+        lambda _version=sqlite3.sqlite_version: False,
+    )
+    db = ArchiveDatabase(
+        tmp_path / "archive.sqlite3",
+        require_qualified_wal=True,
+    )
+    await db.async_start(allow_create=True)
+
+    assert db.health.wal_qualified is False
+    assert db.health.journal_mode == "delete"
+
+    synchronous = await db.async_read(
+        lambda conn: conn.execute("PRAGMA synchronous").fetchone()[0]
+    )
+    # SQLite FULL is numeric level 2.
+    assert synchronous == 2
+    await db.async_stop()
+
+
 @pytest.mark.parametrize(
     ("version", "expected"),
     [
