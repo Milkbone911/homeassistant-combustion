@@ -20,7 +20,11 @@ from custom_components.combustion.storage.database import (
     ArchiveStatus,
     sqlite_wal_fix_qualified,
 )
-from custom_components.combustion.storage.schema import install_schema_v1
+from custom_components.combustion.storage.schema import (
+    SCHEMA_V2_CHECKSUM,
+    SCHEMA_V2_SQL,
+    install_schema_v1,
+)
 
 
 @pytest.mark.asyncio
@@ -157,6 +161,101 @@ async def test_v1_archive_migrates_to_v3_without_changing_identity_or_cloud_rows
         ("local_sources",),
     ]
 
+    await db.async_stop()
+
+
+@pytest.mark.asyncio
+async def test_v2_archive_migrates_to_v3_preserving_s4_local_rows(tmp_path: Path):
+    """S5 migration preserves an accepted S4 local archive boundary."""
+    path = tmp_path / "combustion" / "archive.sqlite3"
+    path.parent.mkdir(parents=True)
+    archive_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    binding_hash = hashlib.sha256(
+        (archive_id + "\0" + os.path.abspath(path)).encode()
+    ).hexdigest()
+
+    conn = sqlite3.connect(path, isolation_level=None)
+    install_schema_v1(
+        conn,
+        archive_id=archive_id,
+        application_fingerprint="s3-fixture",
+        path_binding_hash=binding_hash,
+    )
+    conn.executescript("BEGIN IMMEDIATE;\n" + SCHEMA_V2_SQL)
+    conn.execute(
+        """
+        UPDATE archive_meta
+        SET schema_version=2,
+            minimum_reader_version=2,
+            database_generation=2,
+            application_fingerprint='s4-fixture'
+        WHERE id=1
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO schema_migrations(
+            version,checksum,applied_at_us,application_fingerprint
+        ) VALUES(2,?,?,?)
+        """,
+        (SCHEMA_V2_CHECKSUM, 1_790_000_000_000_000, "s4-fixture"),
+    )
+    conn.execute("COMMIT")
+    conn.execute(
+        """
+        INSERT INTO local_sources(
+            local_source_id,subject_kind,raw_serial,first_seen_us,last_seen_us
+        ) VALUES('local-probe','probe','10014e68',1,2)
+        """
+    )
+    conn.close()
+
+    binding = path.with_name("archive.binding.json")
+    binding.write_text(
+        json.dumps(
+            {
+                "binding_version": 1,
+                "archive_id": archive_id,
+                "database_path": str(path),
+                "path_binding_hash": binding_hash,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    )
+    os.chmod(binding, 0o600)
+
+    db = ArchiveDatabase(
+        path,
+        require_qualified_wal=False,
+        application_fingerprint="s5-test",
+    )
+    migrated = await db.async_start(allow_create=False)
+
+    assert migrated.archive_id == archive_id
+    assert migrated.schema_version == 3
+    assert migrated.minimum_reader_version == 3
+    assert migrated.database_generation == 3
+
+    preserved = await db.async_read(
+        lambda read: (
+            read.execute(
+                "SELECT subject_kind,raw_serial FROM local_sources"
+            ).fetchall(),
+            read.execute(
+                "SELECT version FROM schema_migrations ORDER BY version"
+            ).fetchall(),
+            read.execute(
+                "SELECT COUNT(*) FROM identity_links"
+            ).fetchone()[0],
+        )
+    )
+    assert preserved == (
+        [("probe", "10014e68")],
+        [(1,), (2,), (3,)],
+        0,
+    )
     await db.async_stop()
 
 
@@ -305,6 +404,7 @@ async def test_consistent_backup_reopens_and_validates_semantics(tmp_path: Path)
     validated = ArchiveDatabase.validate_backup_sync(destination, manifest)
     assert validated["archive_id"] == metadata.archive_id
     assert validated["schema_version"] == 3
+    assert validated["counts"]["identity_links"] == 0
 
     await db.async_stop()
 
