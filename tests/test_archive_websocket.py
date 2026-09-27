@@ -24,7 +24,6 @@ async def _loaded_entry(hass: HomeAssistant) -> MockConfigEntry:
     )
     entry.add_to_hass(hass)
     assert await async_setup_component(hass, DOMAIN, {})
-    assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
     return entry
 
