@@ -613,12 +613,18 @@ class ArchiveDatabase:
             "counts": counts,
         }
 
+    def stop_accepting(self) -> None:
+        """Refuse new archive work before supervisor cancellation/drain."""
+        if self._stopped:
+            return
+        self._accepting = False
+        self.health.status = ArchiveStatus.STOPPING
+
     async def async_stop(self, *, timeout: float = 10.0) -> None:
         """Stop accepting work, drain queued writes, checkpoint and close."""
         if self._stopped:
             return
-        self.health.status = ArchiveStatus.STOPPING
-        self._accepting = False
+        self.stop_accepting()
         thread = self._thread
         if thread is not None:
             self._commands.put(_STOP)
