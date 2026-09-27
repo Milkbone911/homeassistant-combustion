@@ -73,6 +73,7 @@ class CloudSyncSupervisor:
         cloud_health: CloudLinkHealth,
         sync_health: SyncHealth,
     ) -> None:
+        """Initialize one entry-owned reconciliation supervisor."""
         self.hass = hass
         self.entry = entry
         self.repository = repository
@@ -267,7 +268,7 @@ class CloudSyncSupervisor:
             self.cloud_health.status = CloudLinkStatus.DEGRADED
             self.cloud_health.error_category = "transport"
             return
-        if isinstance(err, (CloudSchemaError, CloudBoundsError, CloudConflictError)):
+        if isinstance(err, CloudSchemaError | CloudBoundsError | CloudConflictError):
             self.health.status = SyncStatus.COMPATIBILITY_ERROR
             self.health.last_error_category = "schema"
             self.cloud_health.status = CloudLinkStatus.COMPATIBILITY_ERROR
