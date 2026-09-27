@@ -324,9 +324,9 @@ class _FakeConnectionManager:
 def _prediction_status_packet(mode: ProbeMode = ProbeMode.normal) -> bytes:
     # state=predicting(3), mode=time_to_removal(1), type=removal(1),
     # setpoint=65.0C, heat start=10.0C, 1230s, estimated core=62.5C.
-    state, mode, ptype = 3, 1, 1
+    state, prediction_mode, ptype = 3, 1, 1
     setpoint, heatstart, seconds, core = 650, 100, 1230, 825
-    d0 = state | (mode << 4) | (ptype << 6)
+    d0 = state | (prediction_mode << 4) | (ptype << 6)
     d1 = setpoint & 0xFF
     d2 = ((setpoint >> 8) & 0x03) | ((heatstart & 0x3F) << 2)
     d3 = ((heatstart >> 6) & 0x0F) | ((seconds & 0x0F) << 4)
