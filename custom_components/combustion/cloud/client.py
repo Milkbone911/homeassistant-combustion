@@ -290,8 +290,14 @@ class CombustionCloudClient:
             start=start, end=end,
         )
 
-    async def sessions(self, probe: Probe, *, revisit_first_page: bool = True) -> IndexTraversal:
-        """Bounded index traversal; never claims a vendor-consistent snapshot."""
+    async def sessions(
+        self,
+        probe: Probe,
+        *,
+        revisit_first_page: bool = True,
+        page_observer: Callable[[IndexPage, str], Awaitable[None]] | None = None,
+    ) -> IndexTraversal:
+        """Bounded index traversal; optionally persist each validated page."""
         await self._auth.token()
         params = self._source_params(probe.serial)
         pages: list[IndexPage] = []
@@ -328,6 +334,8 @@ class CombustionCloudClient:
             seen_pages.add(digest)
             digests.append(digest)
             pages.append(page)
+            if page_observer is not None:
+                await page_observer(page, digest)
             for item in page.sessions:
                 prior = seen_sessions.setdefault(item.source_session_token, item)
                 if prior != item:
