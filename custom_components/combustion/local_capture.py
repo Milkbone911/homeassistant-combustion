@@ -34,7 +34,7 @@ from .storage.repository import (
 
 _LOGGER = LOGGER.getChild("local-capture")
 
-CAPTURE_POLICY_VERSION = 1
+CAPTURE_POLICY_VERSION = 2
 REGULAR_INTERVAL_SECONDS = 1.0
 MAX_QUEUE_ITEMS = 256
 WRITE_BATCH_SIZE = 50
@@ -102,10 +102,14 @@ class LocalCaptureSupervisor:
 
         self._queue: list[LocalObservationRecord] = []
         self._queue_event = asyncio.Event()
-        self._pending_regular: dict[tuple[str, str], LocalObservationRecord] = {}
-        self._regular_timers: dict[tuple[str, str], asyncio.TimerHandle] = {}
-        self._last_regular_emitted: dict[tuple[str, str], float] = {}
-        self._last_signature: dict[tuple[str, str], tuple[Any, ...]] = {}
+        self._pending_regular: dict[
+            tuple[str, str, str], LocalObservationRecord
+        ] = {}
+        self._regular_timers: dict[tuple[str, str, str], asyncio.TimerHandle] = {}
+        self._last_regular_emitted: dict[tuple[str, str, str], float] = {}
+        self._last_signature: dict[
+            tuple[str, str, str], tuple[Any, ...]
+        ] = {}
         self._pending_gaps: dict[
             tuple[str | None, str | None, str, str], _GapAccumulator
         ] = {}
@@ -168,13 +172,14 @@ class LocalCaptureSupervisor:
         if record is None:
             return
 
-        key = (record.subject_kind, record.raw_serial)
+        key = self._stream_key(record)
         if is_regular:
             self._offer_regular(key, record)
             return
 
-        # A meaningful transition may occur inside the one-second regular
-        # window. Preserve the pending regular point before the transition.
+        # Normal and Instant Read are independent Combustion data streams, not
+        # arrival-ordered physical mode transitions. A true status transition
+        # only flushes the pending point for the stream that supplied it.
         self._flush_regular(key)
         self._enqueue(record)
 
@@ -278,12 +283,28 @@ class LocalCaptureSupervisor:
                 payload["t1"] = data.temperature_data[0]
                 valid.append("t1")
 
-            signature = (
-                mode_name,
-                data.battery_ok,
-                data.overheating,
+            stream = mode_name or "unknown"
+            if mode_name == "normal":
+                # Overheating derives from the normal stream's valid T1-T8
+                # temperatures. Do not compare it against Instant Read, where
+                # only T1 is semantically valid.
+                signature = (
+                    data.battery_ok,
+                    data.overheating,
+                    tuple(data.overheating_sensor_numbers),
+                    data.probe_id,
+                )
+            else:
+                signature = (
+                    data.battery_ok,
+                    data.probe_id,
+                )
+            is_regular = not self._signature_changed(
+                "probe",
+                serial,
+                stream,
+                signature,
             )
-            is_regular = not self._signature_changed("probe", serial, signature)
             return (
                 self._new_record(
                     subject_kind="probe",
@@ -340,7 +361,12 @@ class LocalCaptureSupervisor:
                 data.low_alarm.alarming,
                 data.low_alarm.temperature,
             )
-            is_regular = not self._signature_changed("gauge", serial, signature)
+            is_regular = not self._signature_changed(
+                "gauge",
+                serial,
+                "ble",
+                signature,
+            )
             valid = ("t1",) if data.temperature is not None else ()
             return (
                 self._new_record(
@@ -371,7 +397,12 @@ class LocalCaptureSupervisor:
                 "high_radio_power": data.high_radio_power,
             }
             signature = (data.high_radio_power,)
-            is_regular = not self._signature_changed("node", serial, signature)
+            is_regular = not self._signature_changed(
+                "node",
+                serial,
+                "ble",
+                signature,
+            )
             return (
                 self._new_record(
                     subject_kind="node",
@@ -395,13 +426,26 @@ class LocalCaptureSupervisor:
 
         return None, False
 
+    @staticmethod
+    def _stream_key(
+        record: LocalObservationRecord,
+    ) -> tuple[str, str, str]:
+        """Return the regular-policy stream key for one local observation."""
+        if record.subject_kind == "probe" and record.observation_kind == "ble":
+            stream = record.mode_name or "unknown"
+        else:
+            stream = record.observation_kind
+        return (record.subject_kind, record.raw_serial, stream)
+
     def _signature_changed(
         self,
         subject_kind: str,
         raw_serial: str,
+        stream: str,
         signature: tuple[Any, ...],
     ) -> bool:
-        key = (subject_kind, raw_serial)
+        """Track meaningful status independently for each source data stream."""
+        key = (subject_kind, raw_serial, stream)
         prior = self._last_signature.get(key)
         self._last_signature[key] = signature
         return prior is None or prior != signature
@@ -454,7 +498,7 @@ class LocalCaptureSupervisor:
 
     def _offer_regular(
         self,
-        key: tuple[str, str],
+        key: tuple[str, str, str],
         record: LocalObservationRecord,
     ) -> None:
         now_mono = record.received_monotonic_ns / 1_000_000_000
@@ -474,7 +518,7 @@ class LocalCaptureSupervisor:
             )
 
     @callback
-    def _flush_regular(self, key: tuple[str, str]) -> None:
+    def _flush_regular(self, key: tuple[str, str, str]) -> None:
         handle = self._regular_timers.pop(key, None)
         if handle is not None:
             handle.cancel()

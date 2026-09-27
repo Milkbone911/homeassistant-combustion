@@ -212,11 +212,11 @@ async def test_regular_policy_keeps_latest_pending_point_on_clean_stop(
 
 
 @pytest.mark.asyncio
-async def test_mode_transition_is_not_coalesced_with_regular_samples(
+async def test_normal_and_instant_streams_are_bucketed_independently(
     hass: HomeAssistant,
     tmp_path: Path,
 ):
-    """Instant-read validity/mode transition survives a pending regular point."""
+    """Interleaved Normal/Instant packets are streams, not mode transitions."""
     database, _repository, probes, _predictions, _health, supervisor = await _capture(
         hass, tmp_path
     )
@@ -229,6 +229,15 @@ async def test_mode_transition_is_not_coalesced_with_regular_samples(
             85.0,
             monotonic=200.03,
             epoch=2_000.03,
+            mode=ProbeMode.instantRead,
+        )
+    )
+    probes.emit(_probe_observation(23.0, monotonic=200.04, epoch=2_000.04))
+    probes.emit(
+        _probe_observation(
+            86.0,
+            monotonic=200.05,
+            epoch=2_000.05,
             mode=ProbeMode.instantRead,
         )
     )
@@ -246,8 +255,48 @@ async def test_mode_transition_is_not_coalesced_with_regular_samples(
     assert rows == [
         ("transition", "normal", 20.0, 20.0),
         ("regular", "normal", 21.0, 21.0),
-        ("regular", "normal", 22.0, 22.0),
         ("transition", "instant_read", 85.0, None),
+        ("regular", "normal", 23.0, 23.0),
+        ("regular", "instant_read", 86.0, None),
+    ]
+    await database.async_stop()
+
+
+@pytest.mark.asyncio
+async def test_normal_status_transition_does_not_depend_on_instant_stream(
+    hass: HomeAssistant,
+    tmp_path: Path,
+):
+    """Normal status baseline survives interleaved Instant Read evidence."""
+    database, _repository, probes, _predictions, _health, supervisor = await _capture(
+        hass, tmp_path
+    )
+
+    probes.emit(_probe_observation(20.0, monotonic=210.00, epoch=2_100.00))
+    probes.emit(
+        _probe_observation(
+            80.0,
+            monotonic=210.01,
+            epoch=2_100.01,
+            mode=ProbeMode.instantRead,
+        )
+    )
+    probes.emit(_probe_observation(21.0, monotonic=210.02, epoch=2_100.02))
+    await supervisor.async_stop()
+
+    rows = await database.async_read(
+        lambda conn: conn.execute(
+            """
+            SELECT capture_class,mode_name,t1,t2
+            FROM local_observations
+            ORDER BY event_ordinal
+            """
+        ).fetchall()
+    )
+    assert rows == [
+        ("transition", "normal", 20.0, 20.0),
+        ("transition", "instant_read", 80.0, None),
+        ("regular", "normal", 21.0, 21.0),
     ]
     await database.async_stop()
 
