@@ -210,6 +210,37 @@ async def test_partial_discovery_retains_validated_pages_and_candidates(
 
 
 @pytest.mark.asyncio
+async def test_startup_recovery_marks_abandoned_discovery_partial(
+    tmp_path: Path,
+):
+    """Reload recovery closes stale discovery runs without claiming completion."""
+    db = await _database(tmp_path)
+    repo = ArchiveRepository(db)
+    account_id, sources = await repo.async_register_account(
+        "subject", 1, [Probe("probe-a", "locator")]
+    )
+    run = await repo.async_begin_discovery(
+        account_id=account_id,
+        generation=1,
+        source=sources["probe-a"],
+    )
+
+    assert await repo.async_recover_interrupted_work() == 0
+    status = await db.async_read(
+        lambda conn: conn.execute(
+            """
+            SELECT terminal_status,terminal_reason,completed_at_us
+            FROM discovery_runs WHERE run_id=?
+            """,
+            (run,),
+        ).fetchone()
+    )
+    assert status[0:2] == ("partial", "interrupted")
+    assert status[2] is not None
+    await db.async_stop()
+
+
+@pytest.mark.asyncio
 async def test_duplicate_import_is_idempotent_and_receipt_backed(tmp_path: Path):
     """Repeating committed work does not increase source-key counts."""
     db = await _database(tmp_path)
