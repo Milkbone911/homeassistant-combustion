@@ -1401,7 +1401,6 @@ class ArchiveRepository:
             return [
                 {
                     "session_id": str(row[0]),
-                    "source_session_token": str(row[1]),
                     "first_seen_us": int(row[2]),
                     "last_seen_us": int(row[3]),
                     "identity_state": str(row[4]),
