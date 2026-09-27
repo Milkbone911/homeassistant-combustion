@@ -295,20 +295,34 @@ def install_schema_v1(
 ) -> ArchiveMetadata:
     """Install schema v1 into an empty database in one explicit transaction."""
     now = utc_now_us()
-    script = (
-        "BEGIN IMMEDIATE;\n"
-        + SCHEMA_V1_SQL
-        + "\nINSERT INTO archive_meta("
-        "id,archive_id,schema_version,minimum_reader_version,created_at_us,"
-        "database_generation,application_fingerprint,path_binding_hash) VALUES("
-        f"1,{json.dumps(archive_id)},{SCHEMA_VERSION},{MINIMUM_READER_VERSION},"
-        f"{now},1,{json.dumps(application_fingerprint)},{json.dumps(path_binding_hash)});"
-        "\nINSERT INTO schema_migrations(version,checksum,applied_at_us,application_fingerprint) "
-        f"VALUES(1,{json.dumps(SCHEMA_V1_CHECKSUM)},{now},{json.dumps(application_fingerprint)});"
-        "\nCOMMIT;"
-    )
     try:
-        conn.executescript(script)
+        conn.executescript("BEGIN IMMEDIATE;\n" + SCHEMA_V1_SQL)
+        conn.execute(
+            """
+            INSERT INTO archive_meta(
+                id,archive_id,schema_version,minimum_reader_version,created_at_us,
+                database_generation,application_fingerprint,path_binding_hash
+            ) VALUES(1,?,?,?,?,?,?,?)
+            """,
+            (
+                archive_id,
+                SCHEMA_VERSION,
+                MINIMUM_READER_VERSION,
+                now,
+                1,
+                application_fingerprint,
+                path_binding_hash,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO schema_migrations(
+                version,checksum,applied_at_us,application_fingerprint
+            ) VALUES(1,?,?,?)
+            """,
+            (SCHEMA_V1_CHECKSUM, now, application_fingerprint),
+        )
+        conn.execute("COMMIT")
     except sqlite3.Error as err:
         try:
             conn.execute("ROLLBACK")
