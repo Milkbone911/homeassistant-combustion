@@ -420,9 +420,9 @@ async def websocket_recorder_backfill_preview(
     except RuntimeError:
         connection.send_error(msg["id"], ERR_NOT_SUPPORTED, "Archive is not ready")
         return
-    except Exception as err:  # noqa: BLE001
+    except Exception:  # noqa: BLE001
         connection.send_error(
-            msg["id"], ERR_NOT_SUPPORTED, f"Recorder backfill is not eligible: {err}"
+            msg["id"], ERR_NOT_SUPPORTED, "Recorder backfill is not eligible"
         )
         return
     connection.send_result(msg["id"], _serialize_backfill_plan(plan))
@@ -448,9 +448,9 @@ async def websocket_recorder_backfill(
     except RuntimeError:
         connection.send_error(msg["id"], ERR_NOT_SUPPORTED, "Archive is not ready")
         return
-    except Exception as err:  # noqa: BLE001
+    except Exception:  # noqa: BLE001
         connection.send_error(
-            msg["id"], ERR_NOT_SUPPORTED, f"Recorder backfill was not queued: {err}"
+            msg["id"], ERR_NOT_SUPPORTED, "Recorder backfill was not queued"
         )
         return
     result = _serialize_backfill_plan(plan)
