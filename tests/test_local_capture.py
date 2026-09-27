@@ -253,6 +253,112 @@ async def test_mode_transition_is_not_coalesced_with_regular_samples(
 
 
 @pytest.mark.asyncio
+async def test_equal_regular_values_remain_distinct_selected_observations(
+    hass: HomeAssistant,
+    tmp_path: Path,
+):
+    """Equal temperatures at different admitted times are not deduplicated."""
+    database, _repository, probes, _predictions, _health, supervisor = await _capture(
+        hass, tmp_path
+    )
+
+    probes.emit(_probe_observation(50.0, monotonic=225.00, epoch=2_250.00))
+    probes.emit(_probe_observation(50.0, monotonic=225.01, epoch=2_250.01))
+    probes.emit(_probe_observation(50.0, monotonic=226.10, epoch=2_251.10))
+    await supervisor.async_stop()
+
+    rows = await database.async_read(
+        lambda conn: conn.execute(
+            """
+            SELECT capture_class,t1,received_at_us
+            FROM local_observations
+            ORDER BY event_ordinal
+            """
+        ).fetchall()
+    )
+    assert rows == [
+        ("transition", 50.0, 2_250_000_000),
+        ("regular", 50.0, 2_250_010_000),
+        ("regular", 50.0, 2_251_100_000),
+    ]
+    await database.async_stop()
+
+
+@pytest.mark.asyncio
+async def test_first_instant_read_archives_only_t1_as_valid_temperature(
+    hass: HomeAssistant,
+    tmp_path: Path,
+):
+    """A first-ever Instant Read does not synthesize normal T2-T8 history."""
+    database, _repository, probes, _predictions, _health, supervisor = await _capture(
+        hass, tmp_path
+    )
+
+    probes.emit(
+        _probe_observation(
+            82.5,
+            monotonic=230.0,
+            epoch=2_300.0,
+            mode=ProbeMode.instantRead,
+        )
+    )
+    await supervisor.async_stop()
+
+    row = await database.async_read(
+        lambda conn: conn.execute(
+            """
+            SELECT capture_class,mode_name,valid_field_mask,t1,t2,t8
+            FROM local_observations
+            """
+        ).fetchone()
+    )
+    assert row == ("transition", "instant_read", "t1", 82.5, None, None)
+    await database.async_stop()
+
+
+@pytest.mark.asyncio
+async def test_upstream_age_is_retained_without_relabeling_callback_time_as_source_time(
+    hass: HomeAssistant,
+    tmp_path: Path,
+):
+    """Cached/aged HA delivery keeps callback time and upstream age distinct."""
+    database, _repository, probes, _predictions, _health, supervisor = await _capture(
+        hass, tmp_path
+    )
+
+    base = _probe_observation(40.0, monotonic=240.0, epoch=2_400.0)
+    aged = BluetoothObservation(
+        device_data=base.device_data,
+        received_at_monotonic=240.0,
+        source_address=base.source_address,
+        scanner_source=base.scanner_source,
+        rssi=base.rssi,
+        upstream_time=210.0,
+        connectable=base.connectable,
+        received_at_epoch=2_400.0,
+        upstream_age_seconds=30.0,
+        manufacturer_payload_hex=base.manufacturer_payload_hex,
+    )
+    probes.emit(aged)
+    await supervisor.async_stop()
+
+    row = await database.async_read(
+        lambda conn: conn.execute(
+            """
+            SELECT received_at_us,freshness_basis,raw_json
+            FROM local_observations
+            """
+        ).fetchone()
+    )
+    retained = json.loads(row[2])
+    assert row[0] == 2_400_000_000
+    assert row[1] == "upstream_monotonic"
+    assert retained["payload"]["upstream_age_seconds"] == 30.0
+    assert retained["upstream_time"] == 210.0
+    await database.async_stop()
+
+
+@pytest.mark.asyncio
 async def test_gauge_alarm_change_is_preserved_as_transition(
     hass: HomeAssistant,
     tmp_path: Path,
