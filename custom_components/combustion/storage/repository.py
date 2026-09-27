@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..cloud.client import IndexTraversal
-from ..cloud.models import Probe, SampleRow, SessionIndex, SessionMeta, normalize_ranges
+from ..cloud.models import Probe, SampleRow, SessionMeta, normalize_ranges
 from .database import ArchiveDatabase
 from .schema import canonical_json, content_hash, parse_utc_us, utc_now_us
 
@@ -283,6 +283,7 @@ class ArchiveRepository:
         *,
         fault_injector: FaultInjector | None = None,
     ) -> None:
+        """Initialize the repository over one archive database."""
         self.database = database
         self._fault = fault_injector or (lambda _point: None)
 
@@ -794,6 +795,7 @@ class ArchiveRepository:
         manifest_id = _manifest_identity(work.session_id, metadata_hash)
 
         def write(conn: sqlite3.Connection) -> ManifestRecord:
+            resolved_manifest_id = manifest_id
             with _tx(conn):
                 state = conn.execute(
                     "SELECT state FROM sync_work WHERE work_id=?", (work.work_id,)
@@ -864,13 +866,16 @@ class ArchiveRepository:
                     for start, end in normalized:
                         conn.execute(
                             """
-                            INSERT INTO manifest_ranges(manifest_id,start_seq,end_seq)
+                            INSERT INTO manifest_ranges(resolved_manifest_id,start_seq,end_seq)
                             VALUES(?,?,?)
                             """,
-                            (manifest_id, start, end),
+                            (resolved_manifest_id, start, end),
                         )
                 else:
-                    manifest_id, revision = str(existing[0]), int(existing[1])
+                    resolved_manifest_id, revision = (
+                        str(existing[0]),
+                        int(existing[1]),
+                    )
 
                 conn.execute(
                     """
@@ -894,13 +899,13 @@ class ArchiveRepository:
                     (now, work.work_id),
                 )
 
-                missing = _first_missing_chunk(conn, work.session_id, manifest_id)
+                missing = _first_missing_chunk(conn, work.session_id, resolved_manifest_id)
                 if missing is not None:
                     _enqueue_work(
                         conn,
                         kind="sample",
                         session_id=work.session_id,
-                        manifest_id=manifest_id,
+                        manifest_id=resolved_manifest_id,
                         start_seq=missing[0],
                         end_seq=missing[1],
                         priority=60,
@@ -911,13 +916,13 @@ class ArchiveRepository:
                         (work.session_id,),
                     ).fetchone()[0]
                     if last_audit is None or int(last_audit) + FULL_AUDIT_INTERVAL_US <= now:
-                        audit = _next_manifest_chunk_after(conn, manifest_id, None)
+                        audit = _next_manifest_chunk_after(conn, resolved_manifest_id, None)
                         if audit is not None:
                             _enqueue_work(
                                 conn,
                                 kind="audit",
                                 session_id=work.session_id,
-                                manifest_id=manifest_id,
+                                manifest_id=resolved_manifest_id,
                                 start_seq=audit[0],
                                 end_seq=audit[1],
                                 priority=200,
@@ -934,7 +939,11 @@ class ArchiveRepository:
                 self._fault("before_commit")
             self._fault("after_commit")
             return ManifestRecord(
-                str(manifest_id), work.session_id, int(revision), changed, normalized
+                str(resolved_manifest_id),
+                work.session_id,
+                int(revision),
+                changed,
+                normalized,
             )
 
         return await self.database.async_write(write)
