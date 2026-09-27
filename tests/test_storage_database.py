@@ -131,15 +131,17 @@ async def test_cancelled_await_does_not_claim_disk_work_stopped(tmp_path: Path):
 
     for _ in range(50):
         try:
-            value = await db.async_read(
+            row = await db.async_read(
                 lambda conn: conn.execute(
                     "SELECT value FROM cancellation_proof"
-                ).fetchone()[0]
+                ).fetchone()
             )
         except sqlite3.OperationalError:
+            row = None
+        if row is None:
             await asyncio.sleep(0.01)
             continue
-        assert value == 1
+        assert row[0] == 1
         break
     else:
         pytest.fail("thread-owned write did not complete after await cancellation")
