@@ -17,6 +17,11 @@ from homeassistant.core import HomeAssistant, callback
 
 from .const import DOMAIN
 from .reconciliation.sync import MAX_WORK_PER_CYCLE
+from .recorder_backfill import (
+    async_build_recorder_backfill_plan,
+    async_queue_recorder_backfill,
+    recorder_target_candidates,
+)
 from .storage.database import ArchiveStatus
 
 WS_STATUS = "combustion/archive/status"
@@ -24,6 +29,10 @@ WS_SESSIONS = "combustion/archive/sessions"
 WS_SAMPLE_VERSIONS = "combustion/archive/sample_versions"
 WS_SYNC_NOW = "combustion/archive/sync_now"
 WS_BACKUP = "combustion/archive/backup"
+WS_RECORDER_SOURCES = "combustion/archive/recorder_sources"
+WS_RECORDER_TARGETS = "combustion/archive/recorder_targets"
+WS_RECORDER_BACKFILL_PREVIEW = "combustion/archive/recorder_backfill_preview"
+WS_RECORDER_BACKFILL = "combustion/archive/recorder_backfill"
 
 
 @callback
@@ -34,6 +43,10 @@ def async_register_websocket_handlers(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, websocket_archive_sample_versions)
     websocket_api.async_register_command(hass, websocket_archive_sync_now)
     websocket_api.async_register_command(hass, websocket_archive_backup)
+    websocket_api.async_register_command(hass, websocket_recorder_sources)
+    websocket_api.async_register_command(hass, websocket_recorder_targets)
+    websocket_api.async_register_command(hass, websocket_recorder_backfill_preview)
+    websocket_api.async_register_command(hass, websocket_recorder_backfill)
 
 
 def _runtime(hass: HomeAssistant):
@@ -273,3 +286,174 @@ async def websocket_archive_backup(
             "counts": result["counts"],
         },
     )
+
+
+def _backfill_mapping_schema() -> dict:
+    """Return the bounded explicit field/entity mapping schema."""
+    return {cv.string: cv.entity_id}
+
+
+def _serialize_backfill_plan(plan) -> dict[str, Any]:
+    """Return a plan without the internal StatisticData payloads."""
+    return {
+        "source_device_id": plan.source_device_id,
+        "missing_hours": plan.missing_hours,
+        "metrics": [
+            {
+                "field": metric.field,
+                "entity_id": metric.entity_id,
+                "unit_of_measurement": metric.unit_of_measurement,
+                "archive_hours": metric.archive_hours,
+                "existing_hours": metric.existing_hours,
+                "missing_hours": metric.missing_hours,
+            }
+            for metric in plan.metrics
+        ],
+    }
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): WS_RECORDER_SOURCES,
+        vol.Optional("limit", default=20): vol.All(
+            vol.Coerce(int), vol.Range(min=1, max=100)
+        ),
+    }
+)
+@websocket_api.async_response
+async def websocket_recorder_sources(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Return bounded opaque cloud-source summaries for explicit selection."""
+    runtime = _runtime(hass)
+    repository = None if runtime is None else runtime.archive_repository
+    if repository is None:
+        connection.send_error(msg["id"], ERR_NOT_SUPPORTED, "Archive is not ready")
+        return
+    try:
+        sources = await repository.async_recorder_source_summaries(
+            limit=msg["limit"]
+        )
+    except Exception:  # noqa: BLE001
+        connection.send_error(
+            msg["id"], ERR_UNKNOWN_ERROR, "Recorder source query failed"
+        )
+        return
+    connection.send_result(msg["id"], {"sources": sources})
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {vol.Required("type"): WS_RECORDER_TARGETS}
+)
+@websocket_api.async_response
+async def websocket_recorder_targets(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Return existing temperature entities eligible for explicit mapping."""
+    runtime = _runtime(hass)
+    if runtime is None:
+        connection.send_error(msg["id"], ERR_NOT_FOUND, "Combustion entry is not loaded")
+        return
+    entries = hass.config_entries.async_loaded_entries(DOMAIN)
+    if len(entries) != 1:
+        connection.send_error(msg["id"], ERR_NOT_FOUND, "Combustion entry is not loaded")
+        return
+    connection.send_result(
+        msg["id"],
+        {"targets": recorder_target_candidates(hass, entries[0])},
+    )
+
+
+_BACKFILL_COMMAND_SCHEMA = {
+    vol.Required("source_device_id"): cv.string,
+    vol.Required("mapping"): _backfill_mapping_schema(),
+    vol.Optional("start_us"): vol.All(vol.Coerce(int), vol.Range(min=0)),
+    vol.Optional("end_us"): vol.All(vol.Coerce(int), vol.Range(min=0)),
+}
+
+
+async def _async_recorder_plan_from_message(
+    hass: HomeAssistant,
+    msg: dict[str, Any],
+):
+    """Build one bounded plan from a validated admin message."""
+    runtime = _runtime(hass)
+    repository = None if runtime is None else runtime.archive_repository
+    if runtime is None or repository is None:
+        raise RuntimeError("archive_not_ready")
+    entries = hass.config_entries.async_loaded_entries(DOMAIN)
+    if len(entries) != 1:
+        raise RuntimeError("entry_not_loaded")
+    return await async_build_recorder_backfill_plan(
+        hass,
+        entries[0],
+        repository,
+        source_device_id=msg["source_device_id"],
+        mapping=msg["mapping"],
+        start_us=msg.get("start_us"),
+        end_us=msg.get("end_us"),
+    )
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): WS_RECORDER_BACKFILL_PREVIEW,
+        **_BACKFILL_COMMAND_SCHEMA,
+    }
+)
+@websocket_api.async_response
+async def websocket_recorder_backfill_preview(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Preview fill-missing Recorder statistics without mutating Recorder."""
+    try:
+        plan = await _async_recorder_plan_from_message(hass, msg)
+    except RuntimeError:
+        connection.send_error(msg["id"], ERR_NOT_SUPPORTED, "Archive is not ready")
+        return
+    except Exception as err:  # noqa: BLE001
+        connection.send_error(
+            msg["id"], ERR_NOT_SUPPORTED, f"Recorder backfill is not eligible: {err}"
+        )
+        return
+    connection.send_result(msg["id"], _serialize_backfill_plan(plan))
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): WS_RECORDER_BACKFILL,
+        **_BACKFILL_COMMAND_SCHEMA,
+    }
+)
+@websocket_api.async_response
+async def websocket_recorder_backfill(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Queue a fill-missing Recorder statistics import after re-planning."""
+    try:
+        plan = await _async_recorder_plan_from_message(hass, msg)
+        queued = async_queue_recorder_backfill(hass, plan)
+    except RuntimeError:
+        connection.send_error(msg["id"], ERR_NOT_SUPPORTED, "Archive is not ready")
+        return
+    except Exception as err:  # noqa: BLE001
+        connection.send_error(
+            msg["id"], ERR_NOT_SUPPORTED, f"Recorder backfill was not queued: {err}"
+        )
+        return
+    result = _serialize_backfill_plan(plan)
+    result["queued_hours"] = queued
+    result["status"] = "queued"
+    connection.send_result(msg["id"], result)
