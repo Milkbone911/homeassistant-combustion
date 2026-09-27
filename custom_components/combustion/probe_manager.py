@@ -77,6 +77,7 @@ class ProbeManager:
         self._latest_observation: dict[str, BluetoothObservation] = {}
         self._mode_seen: dict[str, dict[ProbeMode, float]] = {}
         self._status_mode_seen: dict[str, dict[ProbeMode, float]] = {}
+        self._projected_mode_name: dict[str, str | None] = {}
 
     def init_sensor_platform(self, create_sensors_callback):
         """Initialize sensor platform."""
@@ -172,6 +173,7 @@ class ProbeManager:
             mode = getattr(device_data, "mode", None)
             if isinstance(mode, ProbeMode):
                 self._mode_seen.setdefault(serial, {})[mode] = now
+                self._notify_mode_if_changed(serial)
 
             # S2 capture seam: synchronous/non-awaiting and failure-isolated.
             # S4 can attach a bounded queue offer here without coupling capture
@@ -286,6 +288,14 @@ class ProbeManager:
             return "unknown"
         return None
 
+    def _notify_mode_if_changed(self, serial_number: str) -> None:
+        """Notify entity listeners when the evidence-derived mode changes."""
+        mode_name = self.current_mode_name(serial_number)
+        if self._projected_mode_name.get(serial_number) == mode_name:
+            return
+        self._projected_mode_name[serial_number] = mode_name
+        self.notify_listeners()
+
     @staticmethod
     def _mode_name_from_enum(mode: ProbeMode) -> str:
         """Return the Home Assistant enum value for a probe mode."""
@@ -300,17 +310,13 @@ class ProbeManager:
         self, serial_number: str, mode: ProbeMode, received_at: float
     ) -> None:
         """Publish mode evidence from the existing GATT Probe Status stream."""
-        before = self.current_mode_name(serial_number)
         self._status_mode_seen.setdefault(serial_number, {})[mode] = received_at
-        if self.current_mode_name(serial_number) != before:
-            self.notify_listeners()
+        self._notify_mode_if_changed(serial_number)
 
     def clear_status_mode(self, serial_number: str) -> None:
         """Clear stale/disconnected GATT mode evidence and refresh projection."""
-        before = self.current_mode_name(serial_number)
         self._status_mode_seen.pop(serial_number, None)
-        if self.current_mode_name(serial_number) != before:
-            self.notify_listeners()
+        self._notify_mode_if_changed(serial_number)
 
     def latest_device_data(self, serial_number: str):
         """Latest selected parser object for diagnostic/provenance fields."""
