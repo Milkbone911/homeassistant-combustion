@@ -22,12 +22,27 @@ from .local_capture import (
 from .prediction_manager import PredictionManager
 from .probe_manager import ProbeManager
 from .reconciliation.sync import CloudSyncSupervisor, SyncHealth
+from .source_link import SourceLinkRepository
 from .storage.database import (
     ArchiveDatabase,
     ArchiveHealth,
     ArchiveShutdownIncomplete,
 )
 from .storage.repository import ArchiveRepository
+
+
+@dataclass(slots=True)
+class SourceLinkHealth:
+    """Sanitized S5 cross-source link health."""
+
+    status: str = "disabled"
+    cloud_probe_sources: int = 0
+    local_probe_sources: int = 0
+    active_links: int = 0
+    unresolved_cloud_sources: int = 0
+    ambiguous_cloud_sources: int = 0
+    last_reconcile_us: int | None = None
+    last_error_category: str | None = None
 
 
 @dataclass(slots=True)
@@ -48,8 +63,10 @@ class CombustionRuntime:
     archive_health: ArchiveHealth = field(default_factory=ArchiveHealth)
     sync_health: SyncHealth = field(default_factory=SyncHealth)
     local_capture_health: LocalCaptureHealth = field(default_factory=LocalCaptureHealth)
+    source_link_health: SourceLinkHealth = field(default_factory=SourceLinkHealth)
     archive_database: ArchiveDatabase | None = field(default=None, repr=False)
     archive_repository: ArchiveRepository | None = field(default=None, repr=False)
+    source_link_repository: SourceLinkRepository | None = field(default=None, repr=False)
     sync_supervisor: CloudSyncSupervisor | None = field(default=None, repr=False)
     local_capture_supervisor: LocalCaptureSupervisor | None = field(
         default=None, repr=False
