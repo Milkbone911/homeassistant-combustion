@@ -23,6 +23,7 @@ from .prediction_manager import PredictionManager
 from .probe_manager import ProbeManager
 from .reconciliation.sync import CloudSyncSupervisor, SyncHealth
 from .source_link import SourceLinkRepository
+from .statistics_projection import StatisticsProjectionHealth
 from .storage.database import (
     ArchiveDatabase,
     ArchiveHealth,
