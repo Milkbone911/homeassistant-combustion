@@ -25,6 +25,7 @@ from ..cloud.models import (
     CloudTransportError,
 )
 from ..cloud.sessions import numeric_session_token
+from ..storage.database import ArchiveError
 from ..storage.repository import ArchiveRepository, SyncWork
 from ..storage.schema import utc_now_us
 
@@ -288,6 +289,8 @@ class CloudSyncSupervisor:
             raise ValueError("Invalid sync cycle budget")
 
         async with self._cycle_lock:
+            if not self.repository.database.accepting:
+                raise ArchiveError("Archive is not accepting history work")
             self.health.status = SyncStatus.SYNCING
             now = utc_now_us()
 
@@ -335,6 +338,11 @@ class CloudSyncSupervisor:
                     raise
                 except CloudLinkChangedError as err:
                     self._publish_failure(err)
+                    return
+                except ArchiveError:
+                    self.health.status = SyncStatus.DEGRADED
+                    self.health.last_error_category = "storage"
+                    await self._refresh_queue_health()
                     return
                 except (
                     CloudAuthError,
