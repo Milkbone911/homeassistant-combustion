@@ -76,7 +76,7 @@ class ProbeManager:
         self._known_devices: set[str] = set()
         self._latest_observation: dict[str, BluetoothObservation] = {}
         self._mode_seen: dict[str, dict[ProbeMode, float]] = {}
-        self._status_mode: dict[str, tuple[ProbeMode, float]] = {}
+        self._status_mode_seen: dict[str, dict[ProbeMode, float]] = {}
 
     def init_sensor_platform(self, create_sensors_callback):
         """Initialize sensor platform."""
@@ -265,24 +265,24 @@ class ProbeManager:
         """Return the best-supported current mode without latest-packet flicker."""
         now = time.monotonic()
 
-        status_entry = self._status_mode.get(serial_number)
-        if status_entry is not None:
-            status_mode, seen_at = status_entry
-            if now - seen_at < STATUS_MODE_FRESH_SECONDS:
-                return self._mode_name_from_enum(status_mode)
-
         recent_modes = {
             mode
             for mode, seen_at in self._mode_seen.get(serial_number, {}).items()
             if now - seen_at < MODE_ADVERTISEMENT_FRESH_SECONDS
         }
+        recent_modes.update(
+            mode
+            for mode, seen_at in self._status_mode_seen.get(serial_number, {}).items()
+            if now - seen_at < STATUS_MODE_FRESH_SECONDS
+        )
+
         if len(recent_modes) == 1:
             return self._mode_name_from_enum(next(iter(recent_modes)))
         if recent_modes:
-            # Multiple recent advertisement modes are ambiguous. Combustion's
-            # official frameworks maintain the normal and Instant Read streams
-            # independently; packet arrival order is not evidence of a physical
-            # mode transition.
+            # Combustion's official frameworks maintain Normal and Instant
+            # Read as independent streams for both advertisements and status
+            # notifications. Seeing both recently is therefore ambiguous; the
+            # arrival order is not evidence of a physical mode transition.
             return "unknown"
         return None
 
@@ -301,14 +301,14 @@ class ProbeManager:
     ) -> None:
         """Publish mode evidence from the existing GATT Probe Status stream."""
         before = self.current_mode_name(serial_number)
-        self._status_mode[serial_number] = (mode, received_at)
+        self._status_mode_seen.setdefault(serial_number, {})[mode] = received_at
         if self.current_mode_name(serial_number) != before:
             self.notify_listeners()
 
     def clear_status_mode(self, serial_number: str) -> None:
         """Clear stale/disconnected GATT mode evidence and refresh projection."""
         before = self.current_mode_name(serial_number)
-        self._status_mode.pop(serial_number, None)
+        self._status_mode_seen.pop(serial_number, None)
         if self.current_mode_name(serial_number) != before:
             self.notify_listeners()
 
