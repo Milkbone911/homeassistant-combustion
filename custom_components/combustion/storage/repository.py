@@ -866,7 +866,7 @@ class ArchiveRepository:
                     for start, end in normalized:
                         conn.execute(
                             """
-                            INSERT INTO manifest_ranges(resolved_manifest_id,start_seq,end_seq)
+                            INSERT INTO manifest_ranges(manifest_id,start_seq,end_seq)
                             VALUES(?,?,?)
                             """,
                             (resolved_manifest_id, start, end),
@@ -886,7 +886,7 @@ class ArchiveRepository:
                     (
                         str(uuid.uuid4()),
                         work.session_id,
-                        manifest_id,
+                        resolved_manifest_id,
                         now,
                         "changed" if changed else "unchanged",
                     ),
