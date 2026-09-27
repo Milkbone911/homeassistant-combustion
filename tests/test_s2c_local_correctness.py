@@ -407,6 +407,40 @@ def test_gatt_mode_evidence_does_not_turn_interleaved_streams_into_flapping(
     prediction_manager.async_unload()
 
 
+def test_instant_only_status_mode_is_cleared_on_disconnect(
+    hass: HomeAssistant,
+):
+    """Disconnect clears status evidence even before any Normal prediction exists."""
+    probe_manager = ProbeManager(bt_listener=None)
+    connection = _FakeConnectionManager()
+    connection.connected.add("abc123")
+    entry = MagicMock()
+    entry.async_on_unload = MagicMock()
+    manager = PredictionManager(hass, entry, connection, probe_manager)
+    manager.async_init()
+
+    with (
+        patch(
+            "custom_components.combustion.prediction_manager.time.monotonic",
+            return_value=100.0,
+        ),
+        patch(
+            "custom_components.combustion.probe_manager.time.monotonic",
+            return_value=100.0,
+        ),
+    ):
+        connection.subscriptions[PROBE_STATUS_CHAR](
+            "abc123", _prediction_status_packet(ProbeMode.instantRead)
+        )
+        assert probe_manager.current_mode_name("abc123") == "instant_read"
+
+        connection.connected.remove("abc123")
+        connection.fire_connection_change()
+        assert probe_manager.current_mode_name("abc123") is None
+
+    manager.async_unload()
+
+
 def test_instant_read_status_does_not_overwrite_prediction_state(
     hass: HomeAssistant,
 ):
