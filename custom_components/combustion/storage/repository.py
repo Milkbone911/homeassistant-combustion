@@ -382,6 +382,196 @@ class ArchiveRepository:
 
         return await self.database.async_read(read)
 
+    async def async_begin_discovery(
+        self,
+        *,
+        account_id: str,
+        generation: int,
+        source: SourceDeviceRecord,
+    ) -> str:
+        """Create a durable run before the first index request."""
+        run_id = str(uuid.uuid4())
+        now = utc_now_us()
+
+        def write(conn: sqlite3.Connection) -> str:
+            with _tx(conn):
+                conn.execute(
+                    """
+                    INSERT INTO discovery_runs(
+                        run_id,account_id,link_generation,source_device_id,
+                        started_at_us,completed_at_us,terminal_status,
+                        terminal_reason,snapshot_consistent
+                    ) VALUES(?,?,?,?,?,NULL,'running',NULL,0)
+                    """,
+                    (
+                        run_id,
+                        account_id,
+                        generation,
+                        source.source_device_id,
+                        now,
+                    ),
+                )
+            return run_id
+
+        return await self.database.async_write(write)
+
+    async def async_record_discovery_page(
+        self,
+        *,
+        run_id: str,
+        source: SourceDeviceRecord,
+        page,
+        digest: str,
+    ) -> int:
+        """Persist one validated index page and its source-session candidates."""
+        now = utc_now_us()
+
+        def write(conn: sqlite3.Connection) -> int:
+            with _tx(conn):
+                run = conn.execute(
+                    "SELECT terminal_status FROM discovery_runs WHERE run_id=?",
+                    (run_id,),
+                ).fetchone()
+                if run is None or run[0] != "running":
+                    raise RuntimeError("Discovery run is not active")
+
+                existing_page = conn.execute(
+                    """
+                    SELECT digest FROM discovery_pages
+                    WHERE run_id=? AND page=?
+                    """,
+                    (run_id, page.requested_page),
+                ).fetchone()
+                if existing_page is not None:
+                    if existing_page[0] != digest:
+                        raise RuntimeError("Discovery page changed within one run")
+                    return 0
+
+                raw = {
+                    "requested_page": page.requested_page,
+                    "returned_page": page.returned_page,
+                    "total_pages": page.total_pages,
+                    "sessions": [item.raw for item in page.sessions],
+                }
+                conn.execute(
+                    """
+                    INSERT INTO discovery_pages(
+                        run_id,page,digest,session_count,total_pages,raw_json
+                    ) VALUES(?,?,?,?,?,?)
+                    """,
+                    (
+                        run_id,
+                        page.requested_page,
+                        digest,
+                        len(page.sessions),
+                        page.total_pages,
+                        canonical_json(raw),
+                    ),
+                )
+
+                inserted = 0
+                for item in page.sessions:
+                    session_id = _session_identity(
+                        source.source_device_id, item.source_session_token
+                    )
+                    existing = conn.execute(
+                        """
+                        SELECT index_id,identity_state FROM cloud_sessions
+                        WHERE session_id=?
+                        """,
+                        (session_id,),
+                    ).fetchone()
+                    identity_state = "source_only"
+                    index_id = item.index_id
+                    if existing is not None:
+                        old_index = existing[0]
+                        identity_state = str(existing[1])
+                        if (
+                            old_index is not None
+                            and item.index_id is not None
+                            and old_index != item.index_id
+                        ):
+                            identity_state = "index_conflict"
+                            index_id = old_index
+                    else:
+                        inserted += 1
+
+                    conn.execute(
+                        """
+                        INSERT INTO cloud_sessions(
+                            session_id,source_device_id,source_session_token,index_id,
+                            first_seen_us,last_seen_us,identity_state,sample_period_ms,
+                            started_at_source,ended_at_source,last_full_audit_us
+                        ) VALUES(?,?,?,?,?,?,?,?,?,?,NULL)
+                        ON CONFLICT(session_id) DO UPDATE SET
+                            last_seen_us=excluded.last_seen_us,
+                            identity_state=excluded.identity_state,
+                            sample_period_ms=COALESCE(
+                                excluded.sample_period_ms,cloud_sessions.sample_period_ms
+                            ),
+                            started_at_source=COALESCE(
+                                cloud_sessions.started_at_source,
+                                excluded.started_at_source
+                            ),
+                            ended_at_source=COALESCE(
+                                excluded.ended_at_source,
+                                cloud_sessions.ended_at_source
+                            )
+                        """,
+                        (
+                            session_id,
+                            source.source_device_id,
+                            item.source_session_token,
+                            index_id,
+                            now,
+                            now,
+                            identity_state,
+                            item.sample_period_ms,
+                            item.started_at,
+                            item.ended_at,
+                        ),
+                    )
+                    _enqueue_work(
+                        conn,
+                        kind="manifest",
+                        session_id=session_id,
+                        priority=50,
+                    )
+                return inserted
+
+        return await self.database.async_write(write)
+
+    async def async_finish_discovery(
+        self,
+        run_id: str,
+        *,
+        complete: bool,
+        terminal_reason: str,
+        snapshot_consistent: bool = False,
+    ) -> None:
+        """Close a run explicitly as complete or partial."""
+        now = utc_now_us()
+
+        def write(conn: sqlite3.Connection) -> None:
+            with _tx(conn):
+                conn.execute(
+                    """
+                    UPDATE discovery_runs
+                    SET completed_at_us=?,terminal_status=?,terminal_reason=?,
+                        snapshot_consistent=?
+                    WHERE run_id=? AND terminal_status='running'
+                    """,
+                    (
+                        now,
+                        "complete" if complete else "partial",
+                        terminal_reason[:64],
+                        int(snapshot_consistent),
+                        run_id,
+                    ),
+                )
+
+        await self.database.async_write(write)
+
     async def async_record_discovery(
         self,
         *,
