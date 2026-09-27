@@ -22,7 +22,9 @@ from .schema import (
     ArchiveSchemaError,
     canonical_json,
     install_schema_v1,
+    migrate_schema,
     read_metadata,
+    read_metadata_compatible,
     utc_now_us,
 )
 
@@ -397,14 +399,25 @@ class ArchiveDatabase:
 
             if new_archive:
                 assert archive_id is not None and binding_hash is not None
-                metadata = install_schema_v1(
+                install_schema_v1(
                     conn,
                     archive_id=archive_id,
                     application_fingerprint=self.application_fingerprint,
                     path_binding_hash=binding_hash,
                 )
+                metadata = migrate_schema(
+                    conn,
+                    application_fingerprint=self.application_fingerprint,
+                )
             else:
-                metadata = read_metadata(conn)
+                # Identity qualification precedes any in-place migration. A
+                # mismatched/unbound archive is never mutated into compliance.
+                metadata = read_metadata_compatible(conn)
+                self._validate_binding(metadata)
+                metadata = migrate_schema(
+                    conn,
+                    application_fingerprint=self.application_fingerprint,
+                )
                 self._validate_binding(metadata)
 
             fk = conn.execute("PRAGMA foreign_key_check").fetchone()
@@ -744,7 +757,7 @@ class ArchiveDatabase:
             quick = conn.execute("PRAGMA quick_check").fetchone()
             if quick is None or quick[0] != "ok":
                 raise ArchiveError("Backup integrity check failed")
-            metadata = read_metadata(conn)
+            metadata = read_metadata_compatible(conn)
             if metadata.archive_id != payload.get("archive_id"):
                 raise ArchiveError("Backup archive identity mismatch")
             if metadata.schema_version != payload.get("schema_version"):

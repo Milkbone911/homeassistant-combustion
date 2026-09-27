@@ -1,4 +1,4 @@
-"""SQLite schema and bounded serialization helpers for archive schema v1."""
+"""SQLite schema, forward migrations and bounded serialization helpers."""
 from __future__ import annotations
 
 import hashlib
@@ -9,8 +9,9 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-SCHEMA_VERSION = 1
-MINIMUM_READER_VERSION = 1
+SCHEMA_VERSION = 2
+MINIMUM_READER_VERSION = 2
+SCHEMA_V1_MINIMUM_READER_VERSION = 1
 MAX_RAW_JSON_BYTES = 256 * 1024
 
 
@@ -287,6 +288,94 @@ CREATE INDEX idx_gaps_session_state ON gaps(session_id, retry_state, start_seq);
 SCHEMA_V1_CHECKSUM = hashlib.sha256(SCHEMA_V1_SQL.encode()).hexdigest()
 
 
+SCHEMA_V2_SQL = """
+CREATE TABLE local_sources (
+    local_source_id TEXT PRIMARY KEY,
+    subject_kind TEXT NOT NULL CHECK (subject_kind IN ('probe', 'gauge', 'node')),
+    raw_serial TEXT NOT NULL,
+    first_seen_us INTEGER NOT NULL,
+    last_seen_us INTEGER NOT NULL,
+    UNIQUE(subject_kind, raw_serial)
+);
+CREATE INDEX idx_local_sources_seen
+ON local_sources(subject_kind, last_seen_us DESC);
+
+CREATE TABLE local_capture_runs (
+    capture_run_id TEXT PRIMARY KEY,
+    runtime_generation TEXT NOT NULL UNIQUE,
+    started_at_us INTEGER NOT NULL,
+    ended_at_us INTEGER,
+    terminal_status TEXT NOT NULL
+        CHECK (terminal_status IN ('running', 'clean', 'interrupted')),
+    policy_version INTEGER NOT NULL CHECK (policy_version >= 1),
+    regular_interval_ms INTEGER NOT NULL CHECK (regular_interval_ms > 0)
+);
+CREATE INDEX idx_local_capture_runs_started
+ON local_capture_runs(started_at_us DESC);
+
+CREATE TABLE local_observations (
+    observation_id TEXT PRIMARY KEY,
+    capture_run_id TEXT NOT NULL
+        REFERENCES local_capture_runs(capture_run_id) ON DELETE RESTRICT,
+    local_source_id TEXT NOT NULL
+        REFERENCES local_sources(local_source_id) ON DELETE RESTRICT,
+    event_ordinal INTEGER NOT NULL CHECK (event_ordinal >= 0),
+    observation_kind TEXT NOT NULL
+        CHECK (observation_kind IN ('ble', 'prediction')),
+    capture_class TEXT NOT NULL
+        CHECK (capture_class IN ('regular', 'transition', 'prediction')),
+    received_at_us INTEGER NOT NULL,
+    received_monotonic_ns INTEGER NOT NULL CHECK (received_monotonic_ns >= 0),
+    upstream_time REAL,
+    source_address TEXT,
+    scanner_source TEXT,
+    rssi REAL,
+    connectable INTEGER CHECK (connectable IS NULL OR connectable IN (0, 1)),
+    route_kind TEXT NOT NULL,
+    mode_name TEXT,
+    freshness_basis TEXT NOT NULL,
+    valid_field_mask TEXT NOT NULL,
+    payload_hash TEXT NOT NULL,
+    t1 REAL, t2 REAL, t3 REAL, t4 REAL, t5 REAL, t6 REAL, t7 REAL, t8 REAL,
+    virtual_core REAL, virtual_surface REAL, virtual_ambient REAL,
+    estimated_core_temperature REAL, prediction_set_point REAL,
+    prediction_state INTEGER, prediction_mode INTEGER, prediction_type INTEGER,
+    prediction_value_seconds INTEGER,
+    raw_json TEXT NOT NULL,
+    committed_at_us INTEGER NOT NULL,
+    UNIQUE(capture_run_id, event_ordinal)
+);
+CREATE INDEX idx_local_observations_source_time
+ON local_observations(local_source_id, received_at_us, event_ordinal);
+CREATE INDEX idx_local_observations_kind_time
+ON local_observations(observation_kind, received_at_us);
+
+CREATE TABLE local_capture_gaps (
+    gap_id TEXT PRIMARY KEY,
+    capture_run_id TEXT REFERENCES local_capture_runs(capture_run_id)
+        ON DELETE RESTRICT,
+    local_source_id TEXT REFERENCES local_sources(local_source_id)
+        ON DELETE RESTRICT,
+    scope TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    first_lost_at_us INTEGER NOT NULL,
+    last_lost_at_us INTEGER NOT NULL,
+    dropped_count INTEGER CHECK (dropped_count IS NULL OR dropped_count > 0),
+    certainty TEXT NOT NULL CHECK (certainty IN ('observed', 'uncertain')),
+    created_at_us INTEGER NOT NULL,
+    CHECK (last_lost_at_us >= first_lost_at_us)
+);
+CREATE INDEX idx_local_capture_gaps_time
+ON local_capture_gaps(first_lost_at_us, last_lost_at_us);
+"""
+
+SCHEMA_V2_CHECKSUM = hashlib.sha256(SCHEMA_V2_SQL.encode()).hexdigest()
+_MIGRATION_CHECKSUMS = {
+    1: SCHEMA_V1_CHECKSUM,
+    2: SCHEMA_V2_CHECKSUM,
+}
+
+
 def install_schema_v1(
     conn: sqlite3.Connection,
     *,
@@ -307,8 +396,8 @@ def install_schema_v1(
             """,
             (
                 archive_id,
-                SCHEMA_VERSION,
-                MINIMUM_READER_VERSION,
+                1,
+                SCHEMA_V1_MINIMUM_READER_VERSION,
                 now,
                 1,
                 application_fingerprint,
@@ -328,11 +417,11 @@ def install_schema_v1(
         with suppress(sqlite3.Error):
             conn.execute("ROLLBACK")
         raise ArchiveSchemaError("Archive schema initialization failed") from err
-    return read_metadata(conn)
+    return read_metadata_compatible(conn)
 
 
-def read_metadata(conn: sqlite3.Connection) -> ArchiveMetadata:
-    """Read and validate the singleton compatibility row."""
+def read_metadata_compatible(conn: sqlite3.Connection) -> ArchiveMetadata:
+    """Read a supported current-or-older archive without mutating it."""
     try:
         row = conn.execute(
             "SELECT archive_id,schema_version,minimum_reader_version,created_at_us,"
@@ -343,17 +432,83 @@ def read_metadata(conn: sqlite3.Connection) -> ArchiveMetadata:
         raise ArchiveSchemaError("Archive metadata unavailable") from err
     if row is None:
         raise ArchiveSchemaError("Archive metadata missing")
+
     metadata = ArchiveMetadata(*row)
+    if metadata.schema_version < 1 or metadata.schema_version > SCHEMA_VERSION:
+        raise ArchiveSchemaError("Archive schema version is unsupported")
     if metadata.minimum_reader_version > SCHEMA_VERSION:
         raise ArchiveSchemaError("Archive requires a newer reader")
-    if metadata.schema_version != SCHEMA_VERSION:
-        raise ArchiveSchemaError("Archive schema version is unsupported")
+
     try:
-        migration = conn.execute(
-            "SELECT checksum FROM schema_migrations WHERE version=1"
-        ).fetchone()
+        migrations = {
+            int(version): str(checksum)
+            for version, checksum in conn.execute(
+                "SELECT version,checksum FROM schema_migrations ORDER BY version"
+            ).fetchall()
+        }
     except sqlite3.Error as err:
         raise ArchiveSchemaError("Archive migration ledger unavailable") from err
-    if migration is None or migration[0] != SCHEMA_V1_CHECKSUM:
-        raise ArchiveSchemaError("Archive migration checksum mismatch")
+
+    expected_versions = set(range(1, metadata.schema_version + 1))
+    if set(migrations) != expected_versions:
+        raise ArchiveSchemaError("Archive migration ledger is inconsistent")
+    for version in expected_versions:
+        if migrations[version] != _MIGRATION_CHECKSUMS[version]:
+            raise ArchiveSchemaError("Archive migration checksum mismatch")
+    return metadata
+
+
+def migrate_schema(
+    conn: sqlite3.Connection,
+    *,
+    application_fingerprint: str,
+) -> ArchiveMetadata:
+    """Forward-migrate one already identity-qualified archive to current schema."""
+    metadata = read_metadata_compatible(conn)
+    if metadata.schema_version == SCHEMA_VERSION:
+        return metadata
+    if metadata.schema_version != 1:
+        raise ArchiveSchemaError("Archive schema has no supported migration path")
+
+    now = utc_now_us()
+    try:
+        conn.executescript("BEGIN IMMEDIATE;\n" + SCHEMA_V2_SQL)
+        conn.execute(
+            """
+            UPDATE archive_meta
+            SET schema_version=?,
+                minimum_reader_version=?,
+                database_generation=database_generation+1,
+                application_fingerprint=?
+            WHERE id=1 AND schema_version=1
+            """,
+            (SCHEMA_VERSION, MINIMUM_READER_VERSION, application_fingerprint),
+        )
+        if conn.execute("SELECT changes()").fetchone()[0] != 1:
+            raise ArchiveSchemaError("Archive migration metadata update failed")
+        conn.execute(
+            """
+            INSERT INTO schema_migrations(
+                version,checksum,applied_at_us,application_fingerprint
+            ) VALUES(2,?,?,?)
+            """,
+            (SCHEMA_V2_CHECKSUM, now, application_fingerprint),
+        )
+        conn.execute("COMMIT")
+    except (sqlite3.Error, ArchiveSchemaError) as err:
+        with suppress(sqlite3.Error):
+            conn.execute("ROLLBACK")
+        if isinstance(err, ArchiveSchemaError):
+            raise
+        raise ArchiveSchemaError("Archive schema migration failed") from err
+    return read_metadata(conn)
+
+
+def read_metadata(conn: sqlite3.Connection) -> ArchiveMetadata:
+    """Read and validate an archive at the current schema version."""
+    metadata = read_metadata_compatible(conn)
+    if metadata.schema_version != SCHEMA_VERSION:
+        raise ArchiveSchemaError("Archive schema version is not current")
+    if metadata.minimum_reader_version != MINIMUM_READER_VERSION:
+        raise ArchiveSchemaError("Archive minimum reader version is inconsistent")
     return metadata
