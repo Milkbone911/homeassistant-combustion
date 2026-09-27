@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -324,10 +325,8 @@ def install_schema_v1(
         )
         conn.execute("COMMIT")
     except sqlite3.Error as err:
-        try:
+        with suppress(sqlite3.Error):
             conn.execute("ROLLBACK")
-        except sqlite3.Error:
-            pass
         raise ArchiveSchemaError("Archive schema initialization failed") from err
     return read_metadata(conn)
 
