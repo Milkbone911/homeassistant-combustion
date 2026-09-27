@@ -1356,7 +1356,8 @@ class ArchiveRepository:
                     COUNT(c.sequence),
                     SUM(CASE WHEN c.conflict_state='conflict' THEN 1 ELSE 0 END),
                     SUM(CASE WHEN v.sampled_at_us IS NULL THEN 1 ELSE 0 END),
-                    SUM(CASE WHEN s.sample_period_ms IS NULL THEN 1 ELSE 0 END),
+                    COUNT(DISTINCT CASE
+                        WHEN s.sample_period_ms IS NULL THEN s.session_id END),
                     (
                         SELECT COUNT(*) FROM gaps g
                         JOIN cloud_sessions gs ON gs.session_id=g.session_id
