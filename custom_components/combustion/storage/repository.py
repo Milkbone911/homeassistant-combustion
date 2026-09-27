@@ -1363,6 +1363,20 @@ class ArchiveRepository:
                         JOIN cloud_sessions gs ON gs.session_id=g.session_id
                         WHERE gs.source_device_id=d.source_device_id
                           AND g.retry_state!='resolved'
+                    ),
+                    (
+                        SELECT COUNT(*) FROM (
+                            SELECT vv.sampled_at_us
+                            FROM cloud_sessions ss
+                            JOIN cloud_samples cc ON cc.session_id=ss.session_id
+                            JOIN cloud_sample_versions vv
+                                ON vv.version_id=cc.selected_version_id
+                            WHERE ss.source_device_id=d.source_device_id
+                              AND cc.conflict_state='single'
+                              AND vv.sampled_at_us IS NOT NULL
+                            GROUP BY vv.sampled_at_us
+                            HAVING COUNT(*)>1
+                        )
                     )
                 FROM source_devices d
                 LEFT JOIN cloud_sessions s
@@ -1389,6 +1403,7 @@ class ArchiveRepository:
                     "missing_timestamp_count": int(row[6] or 0),
                     "sessions_missing_period_count": int(row[7] or 0),
                     "open_gap_count": int(row[8] or 0),
+                    "duplicate_timestamp_count": int(row[9] or 0),
                 }
                 for row in rows
             ]
@@ -1461,6 +1476,20 @@ class ArchiveRepository:
                         JOIN cloud_sessions gs ON gs.session_id=g.session_id
                         WHERE gs.source_device_id=?
                           AND g.retry_state!='resolved'
+                    ),
+                    (
+                        SELECT COUNT(*) FROM (
+                            SELECT vv.sampled_at_us
+                            FROM cloud_sessions ss
+                            JOIN cloud_samples cc ON cc.session_id=ss.session_id
+                            JOIN cloud_sample_versions vv
+                                ON vv.version_id=cc.selected_version_id
+                            WHERE ss.source_device_id=?
+                              AND cc.conflict_state='single'
+                              AND vv.sampled_at_us IS NOT NULL
+                            GROUP BY vv.sampled_at_us
+                            HAVING COUNT(*)>1
+                        )
                     )
                 FROM cloud_sessions s
                 LEFT JOIN cloud_samples c ON c.session_id=s.session_id
@@ -1468,7 +1497,7 @@ class ArchiveRepository:
                     ON v.version_id=c.selected_version_id
                 WHERE s.source_device_id=?
                 """,
-                (source_device_id, source_device_id),
+                (source_device_id, source_device_id, source_device_id),
             ).fetchone()
             if quality is None:
                 raise ValueError("Cloud source has no session data")
