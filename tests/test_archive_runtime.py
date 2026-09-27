@@ -11,6 +11,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from custom_components.combustion.const import (
     CONF_CLOUD_SYNC_ENABLED,
     CONF_HISTORY_ENABLED,
+    CONF_LOCAL_CAPTURE_ENABLED,
     DOMAIN,
 )
 from custom_components.combustion.runtime import CombustionRuntime
@@ -119,6 +120,41 @@ async def test_options_reject_cloud_sync_without_archive(
 
 
 @pytest.mark.asyncio
+async def test_options_reject_local_capture_without_archive(
+    hass: HomeAssistant,
+):
+    """Local BLE/GATT capture cannot run without its durable archive."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id="combustion_meatnet",
+        version=1,
+        data={},
+        options={},
+        title="Meatnet",
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        user_input={
+            "availability_timeout": 90,
+            "update_throttle": 1.0,
+            "enable_active_connection": False,
+            CONF_HISTORY_ENABLED: False,
+            CONF_LOCAL_CAPTURE_ENABLED: True,
+            CONF_CLOUD_SYNC_ENABLED: False,
+        },
+    )
+    assert result["type"] == "form"
+    assert result["errors"] == {
+        "base": "history_required_for_local_capture"
+    }
+
+
+@pytest.mark.asyncio
 async def test_runtime_stops_archive_intake_before_cancelling_sync():
     """Shutdown order is intake fence -> supervisor cancellation -> DB close."""
     events: list[str] = []
@@ -129,6 +165,10 @@ async def test_runtime_stops_archive_intake_before_cancelling_sync():
 
         async def async_stop(self):
             events.append("database_stop")
+
+    class FakeCapture:
+        async def async_stop(self):
+            events.append("capture_stop")
 
     async def supervisor():
         try:
@@ -144,6 +184,7 @@ async def test_runtime_stops_archive_intake_before_cancelling_sync():
         control_manager=MagicMock(),
     )
     runtime.archive_database = FakeDatabase()  # type: ignore[assignment]
+    runtime.local_capture_supervisor = FakeCapture()  # type: ignore[assignment]
     task = asyncio.create_task(supervisor())
     runtime._optional_tasks.add(task)  # noqa: SLF001 - lifecycle ordering contract
     await asyncio.sleep(0)
@@ -151,6 +192,7 @@ async def test_runtime_stops_archive_intake_before_cancelling_sync():
     await runtime.async_stop()
 
     assert events == [
+        "capture_stop",
         "stop_accepting",
         "task_cancelled",
         "database_stop",
