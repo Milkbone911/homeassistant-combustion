@@ -80,6 +80,7 @@ async def websocket_archive_status(
                 "status": archive.status,
                 "schema_version": archive.schema_version,
                 "sqlite_version": archive.sqlite_version,
+                "wal_qualified": archive.wal_qualified,
                 "journal_mode": archive.journal_mode,
                 "error_category": archive.error_category,
                 "database_generation": archive.database_generation,
