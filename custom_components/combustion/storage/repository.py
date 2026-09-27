@@ -1336,7 +1336,224 @@ class ArchiveRepository:
 
         return await self.database.async_write(write)
 
+    async def async_recorder_source_summaries(
+        self,
+        *,
+        limit: int = 20,
+    ) -> list[Mapping[str, Any]]:
+        """Return private-safe cloud source summaries for explicit admin selection."""
+        if not 1 <= limit <= 100:
+            raise ValueError("Source summary limit must be 1..100")
+
+        def read(conn: sqlite3.Connection):
+            rows = conn.execute(
+                """
+                SELECT
+                    d.source_device_id,
+                    d.first_seen_us,
+                    d.last_seen_us,
+                    COUNT(DISTINCT s.session_id),
+                    COUNT(c.sequence),
+                    SUM(CASE WHEN c.conflict_state='conflict' THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN v.sampled_at_us IS NULL THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN s.sample_period_ms IS NULL THEN 1 ELSE 0 END),
+                    (
+                        SELECT COUNT(*) FROM gaps g
+                        JOIN cloud_sessions gs ON gs.session_id=g.session_id
+                        WHERE gs.source_device_id=d.source_device_id
+                          AND g.retry_state!='resolved'
+                    )
+                FROM source_devices d
+                LEFT JOIN cloud_sessions s
+                    ON s.source_device_id=d.source_device_id
+                LEFT JOIN cloud_samples c
+                    ON c.session_id=s.session_id
+                LEFT JOIN cloud_sample_versions v
+                    ON v.version_id=c.selected_version_id
+                WHERE d.source_kind='cloud_probe'
+                GROUP BY d.source_device_id,d.first_seen_us,d.last_seen_us
+                ORDER BY d.last_seen_us DESC,d.source_device_id
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            return [
+                {
+                    "source_device_id": str(row[0]),
+                    "first_seen_us": int(row[1]),
+                    "last_seen_us": int(row[2]),
+                    "session_count": int(row[3]),
+                    "sample_count": int(row[4]),
+                    "conflict_count": int(row[5] or 0),
+                    "missing_timestamp_count": int(row[6] or 0),
+                    "sessions_missing_period_count": int(row[7] or 0),
+                    "open_gap_count": int(row[8] or 0),
+                }
+                for row in rows
+            ]
+
+        return await self.database.async_read(read)
+
+    async def async_recorder_hourly_temperature_statistics(
+        self,
+        source_device_id: str,
+        fields: Sequence[str],
+        *,
+        start_us: int | None = None,
+        end_us: int | None = None,
+        max_hours: int = 10_000,
+    ) -> Mapping[str, list[Mapping[str, Any]]]:
+        """Aggregate selected cloud samples into source-qualified hourly temperatures."""
+        allowed = {
+            "t1",
+            "t2",
+            "t3",
+            "t4",
+            "t5",
+            "t6",
+            "t7",
+            "t8",
+            "virtual_core",
+            "virtual_surface",
+            "virtual_ambient",
+        }
+        requested = tuple(dict.fromkeys(fields))
+        if not requested or any(field not in allowed for field in requested):
+            raise ValueError("Unsupported recorder mirror field")
+        if max_hours < 1 or max_hours > 10_000:
+            raise ValueError("Recorder mirror hour bound is invalid")
+        if start_us is not None and start_us < 0:
+            raise ValueError("Recorder mirror start is invalid")
+        if end_us is not None and end_us < 0:
+            raise ValueError("Recorder mirror end is invalid")
+        if (
+            start_us is not None
+            and end_us is not None
+            and end_us <= start_us
+        ):
+            raise ValueError("Recorder mirror time range is invalid")
+
+        hour_us = 60 * 60 * 1_000_000
+
+        def read(conn: sqlite3.Connection):
+            source = conn.execute(
+                """
+                SELECT 1 FROM source_devices
+                WHERE source_device_id=? AND source_kind='cloud_probe'
+                """,
+                (source_device_id,),
+            ).fetchone()
+            if source is None:
+                raise ValueError("Unknown cloud source device")
+
+            quality = conn.execute(
+                """
+                SELECT
+                    SUM(CASE WHEN c.conflict_state='conflict' THEN 1 ELSE 0 END),
+                    SUM(CASE
+                        WHEN c.selected_version_id IS NOT NULL
+                         AND v.sampled_at_us IS NULL THEN 1 ELSE 0 END),
+                    COUNT(DISTINCT CASE
+                        WHEN s.sample_period_ms IS NULL THEN s.session_id END),
+                    (
+                        SELECT COUNT(*) FROM gaps g
+                        JOIN cloud_sessions gs ON gs.session_id=g.session_id
+                        WHERE gs.source_device_id=?
+                          AND g.retry_state!='resolved'
+                    )
+                FROM cloud_sessions s
+                LEFT JOIN cloud_samples c ON c.session_id=s.session_id
+                LEFT JOIN cloud_sample_versions v
+                    ON v.version_id=c.selected_version_id
+                WHERE s.source_device_id=?
+                """,
+                (source_device_id, source_device_id),
+            ).fetchone()
+            if quality is None:
+                raise ValueError("Cloud source has no session data")
+            if any(int(value or 0) for value in quality):
+                raise ValueError(
+                    "Cloud source has unresolved conflicts, timestamps, periods, or gaps"
+                )
+
+            aggregate_columns: list[str] = []
+            for field in requested:
+                aggregate_columns.extend(
+                    (
+                        f"MIN(v.{field}) AS {field}_min",
+                        f"MAX(v.{field}) AS {field}_max",
+                        (
+                            f"SUM(v.{field} * s.sample_period_ms) / "
+                            f"SUM(CASE WHEN v.{field} IS NOT NULL "
+                            "THEN s.sample_period_ms END) "
+                            f"AS {field}_mean"
+                        ),
+                        f"COUNT(v.{field}) AS {field}_count",
+                    )
+                )
+
+            where = [
+                "s.source_device_id=?",
+                "c.selected_version_id IS NOT NULL",
+                "c.conflict_state='single'",
+                "v.timestamp_basis='vendor_sampled_at'",
+                "v.sampled_at_us IS NOT NULL",
+                "s.sample_period_ms IS NOT NULL",
+                "s.sample_period_ms>0",
+            ]
+            params: list[Any] = [source_device_id]
+            if start_us is not None:
+                where.append("v.sampled_at_us>=?")
+                params.append(start_us)
+            if end_us is not None:
+                where.append("v.sampled_at_us<?")
+                params.append(end_us)
+
+            sql = f"""
+                SELECT
+                    CAST(v.sampled_at_us / {hour_us} AS INTEGER) * {hour_us}
+                        AS hour_start_us,
+                    {",".join(aggregate_columns)}
+                FROM cloud_sessions s
+                JOIN cloud_samples c ON c.session_id=s.session_id
+                JOIN cloud_sample_versions v
+                    ON v.version_id=c.selected_version_id
+                WHERE {" AND ".join(where)}
+                GROUP BY hour_start_us
+                ORDER BY hour_start_us
+                LIMIT ?
+            """
+            params.append(max_hours + 1)
+            rows = conn.execute(sql, params).fetchall()
+            if len(rows) > max_hours:
+                raise ValueError("Recorder mirror exceeds the hour bound")
+
+            result: dict[str, list[Mapping[str, Any]]] = {
+                field: [] for field in requested
+            }
+            stride = 4
+            for row in rows:
+                hour_start = int(row[0])
+                for index, field in enumerate(requested):
+                    base = 1 + index * stride
+                    count = int(row[base + 3])
+                    if count == 0:
+                        continue
+                    result[field].append(
+                        {
+                            "start_us": hour_start,
+                            "min": float(row[base]),
+                            "max": float(row[base + 1]),
+                            "mean": float(row[base + 2]),
+                            "sample_count": count,
+                        }
+                    )
+            return result
+
+        return await self.database.async_read(read)
+
     async def async_queue_counts(self) -> Mapping[str, int]:
+        """Return bounded operational work counts."""    async def async_queue_counts(self) -> Mapping[str, int]:
         """Return bounded operational work counts."""
         def read(conn: sqlite3.Connection):
             result = {"ready": 0, "running": 0, "failed": 0}
