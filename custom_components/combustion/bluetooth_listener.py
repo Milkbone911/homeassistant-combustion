@@ -42,6 +42,7 @@ class BluetoothObservation:
     rssi: int | float | None
     upstream_time: float | None
     connectable: bool | None
+    received_at_epoch: float | None = None
 
 
 def parse_advertisement(service_info: BluetoothServiceInfoBleak):
@@ -170,6 +171,7 @@ class BluetoothListener:
             rssi=rssi,
             upstream_time=upstream_time,
             connectable=connectable,
+            received_at_epoch=time.time(),
         )
 
         # Fan-out is failure-independent. A future archive queue offer must not
