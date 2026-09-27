@@ -421,6 +421,11 @@ class ArchiveDatabase:
         self.health.writer_queue_depth = self._commands.qsize()
         try:
             result = await asyncio.shield(asyncio.wrap_future(future))
+        except (sqlite3.Error, OSError):
+            self._accepting = False
+            self.health.status = ArchiveStatus.DEGRADED
+            self.health.error_category = "storage_write"
+            raise
         finally:
             self.health.writer_queue_depth = self._commands.qsize()
         self.health.last_success_us = utc_now_us()
@@ -448,7 +453,12 @@ class ArchiveDatabase:
             raise ArchiveError("Archive reader pool is unavailable")
         loop = asyncio.get_running_loop()
         future = loop.run_in_executor(self._reader_pool, self._read_call, fn)
-        result = await asyncio.shield(future)
+        try:
+            result = await asyncio.shield(future)
+        except (sqlite3.Error, OSError):
+            self.health.status = ArchiveStatus.DEGRADED
+            self.health.error_category = "storage_read"
+            raise
         self.health.last_success_us = utc_now_us()
         return result
 
