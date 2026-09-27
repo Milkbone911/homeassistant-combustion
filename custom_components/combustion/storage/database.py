@@ -363,6 +363,10 @@ class ArchiveDatabase:
             isolation_level=None,
         )
         try:
+            # Archive/history data is private application state. Restrict the
+            # database before WAL/SHM sidecars are created so SQLite inherits
+            # the same owner-only permissions for its journal files.
+            os.chmod(self.path, 0o600)
             conn.execute("PRAGMA foreign_keys=ON")
             conn.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
             conn.execute("PRAGMA synchronous=FULL")
@@ -384,6 +388,12 @@ class ArchiveDatabase:
             if mode == "wal":
                 conn.execute("PRAGMA wal_autocheckpoint=0")
             self.health.journal_mode = mode
+            for sidecar in (
+                Path(str(self.path) + "-wal"),
+                Path(str(self.path) + "-shm"),
+            ):
+                with suppress(FileNotFoundError):
+                    os.chmod(sidecar, 0o600)
 
             if new_archive:
                 assert archive_id is not None and binding_hash is not None
@@ -552,6 +562,7 @@ class ArchiveDatabase:
         )
         dest = sqlite3.connect(destination, isolation_level=None)
         try:
+            os.chmod(destination, 0o600)
             source.execute("PRAGMA query_only=ON")
             source.backup(dest, pages=256, sleep=0.01)
             dest.execute("PRAGMA foreign_keys=ON")

@@ -54,6 +54,54 @@ async def test_archive_status_websocket_is_sanitized(
 
 
 @pytest.mark.asyncio
+async def test_archive_status_refreshes_sizes_before_reporting(
+    hass: HomeAssistant,
+    hass_ws_client,
+):
+    """Status refreshes live archive sizes instead of returning startup-era values."""
+    entry = await _loaded_entry(hass)
+    runtime = entry.runtime_data
+    runtime.archive_health.status = ArchiveStatus.READY
+    runtime.archive_health.database_bytes = 1
+    runtime.archive_health.wal_bytes = 2
+
+    class FakeDatabase:
+        def stop_accepting(self) -> None:
+            pass
+
+        async def async_stop(self) -> None:
+            pass
+
+        async def async_refresh_sizes(self) -> None:
+            runtime.archive_health.database_bytes = 123
+            runtime.archive_health.wal_bytes = 456
+
+    runtime.archive_database = FakeDatabase()  # type: ignore[assignment]
+    runtime.archive_repository = AsyncMock()
+    runtime.archive_repository.async_archive_counts.return_value = {
+        "devices": 0,
+        "sessions": 0,
+        "manifests": 0,
+        "samples": 0,
+        "versions": 0,
+        "open_gaps": 0,
+    }
+    runtime.archive_repository.async_queue_counts.return_value = {
+        "ready": 0,
+        "running": 0,
+        "failed": 0,
+    }
+
+    client = await hass_ws_client(hass)
+    await client.send_json_auto_id({"type": "combustion/archive/status"})
+    response = await client.receive_json()
+
+    assert response["success"] is True
+    assert response["result"]["archive"]["database_bytes"] == 123
+    assert response["result"]["archive"]["wal_bytes"] == 456
+
+
+@pytest.mark.asyncio
 async def test_archive_backup_websocket_uses_fixed_internal_directory(
     hass: HomeAssistant,
     hass_ws_client,

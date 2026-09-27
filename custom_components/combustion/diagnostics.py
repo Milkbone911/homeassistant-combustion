@@ -7,6 +7,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
 from .cloud.ha import cloud_linked
+from .storage.database import ArchiveStatus
 
 
 async def async_get_config_entry_diagnostics(
@@ -17,6 +18,9 @@ async def async_get_config_entry_diagnostics(
     runtime = entry.runtime_data
     cloud = runtime.cloud_health
     archive = runtime.archive_health
+    database = runtime.archive_database
+    if database is not None and archive.status is ArchiveStatus.READY:
+        await database.async_refresh_sizes()
     sync = runtime.sync_health
     return {
         "cloud": {

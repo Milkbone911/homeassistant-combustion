@@ -31,6 +31,11 @@ async def test_archive_create_reopen_and_identity_binding(tmp_path: Path):
     assert metadata.schema_version == 1
     assert db.binding_path.is_file()
     assert path.is_file()
+    assert path.stat().st_mode & 0o777 == 0o600
+    for suffix in ("-wal", "-shm"):
+        sidecar = Path(str(path) + suffix)
+        if sidecar.exists():
+            assert sidecar.stat().st_mode & 0o777 == 0o600
     assert db.health.journal_mode == "wal"
 
     await db.async_stop()
@@ -168,10 +173,13 @@ async def test_consistent_backup_reopens_and_validates_semantics(tmp_path: Path)
     result = await db.async_backup(destination)
 
     assert destination.is_file()
+    assert destination.stat().st_mode & 0o777 == 0o600
     binding = Path(result["binding"])
     manifest = Path(result["manifest"])
     assert binding.is_file()
     assert manifest.is_file()
+    assert binding.stat().st_mode & 0o777 == 0o600
+    assert manifest.stat().st_mode & 0o777 == 0o600
 
     binding_payload = json.loads(binding.read_text())
     assert set(binding_payload) == {

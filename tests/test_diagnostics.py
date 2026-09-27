@@ -16,6 +16,7 @@ from custom_components.combustion.const import (
     DOMAIN,
 )
 from custom_components.combustion.diagnostics import async_get_config_entry_diagnostics
+from custom_components.combustion.storage.database import ArchiveStatus
 
 
 @pytest.mark.asyncio
@@ -49,6 +50,22 @@ async def test_diagnostics_allowlist_excludes_cloud_secrets_and_identity(
     runtime.cloud_health.error_category = "transport"
     runtime.cloud_health.probe_count = 2
     runtime.cloud_health.verified_generation = 9
+    runtime.archive_health.status = ArchiveStatus.READY
+    runtime.archive_health.database_bytes = 1
+    runtime.archive_health.wal_bytes = 2
+
+    class FakeDatabase:
+        def stop_accepting(self) -> None:
+            pass
+
+        async def async_stop(self) -> None:
+            pass
+
+        async def async_refresh_sizes(self) -> None:
+            runtime.archive_health.database_bytes = 123
+            runtime.archive_health.wal_bytes = 456
+
+    runtime.archive_database = FakeDatabase()  # type: ignore[assignment]
 
     data = await async_get_config_entry_diagnostics(hass, entry)
     rendered = repr(data)
@@ -60,6 +77,8 @@ async def test_diagnostics_allowlist_excludes_cloud_secrets_and_identity(
         "error_category": "transport",
         "verified_generation": 9,
     }
+    assert data["archive"]["database_bytes"] == 123
+    assert data["archive"]["wal_bytes"] == 456
     assert "secret-api-value" not in rendered
     assert "secret-refresh-value" not in rendered
     assert "private-subject-value" not in rendered

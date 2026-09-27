@@ -59,6 +59,9 @@ async def websocket_archive_status(
         return
 
     archive = runtime.archive_health
+    database = runtime.archive_database
+    if database is not None and archive.status is ArchiveStatus.READY:
+        await database.async_refresh_sizes()
     sync = runtime.sync_health
     counts = None
     queue = None
