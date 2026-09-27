@@ -64,6 +64,26 @@ class RecorderBackfillPlan:
         return sum(metric.missing_hours for metric in self.metrics)
 
 
+def recorder_target_candidates(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+) -> dict[str, list[str]]:
+    """Return existing Combustion temperature entities eligible for explicit mapping."""
+    registry = er.async_get(hass)
+    entries = er.async_entries_for_config_entry(registry, entry.entry_id)
+    result = {field: [] for field in RECORDER_TEMPERATURE_TARGET_SUFFIXES}
+    for registry_entry in entries:
+        if registry_entry.domain != "sensor":
+            continue
+        unique_id = registry_entry.unique_id or ""
+        for field, suffix in RECORDER_TEMPERATURE_TARGET_SUFFIXES.items():
+            if unique_id.endswith(suffix):
+                result[field].append(registry_entry.entity_id)
+    for values in result.values():
+        values.sort()
+    return result
+
+
 def _validate_entity_mapping(
     hass: HomeAssistant,
     entry: ConfigEntry,
