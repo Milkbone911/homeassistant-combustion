@@ -428,6 +428,46 @@ async def test_queue_overflow_prefers_dropping_regular_and_persists_loss(
 
 
 @pytest.mark.asyncio
+async def test_drop_accounting_keeps_transition_and_regular_scopes_separate(
+    hass: HomeAssistant,
+    tmp_path: Path,
+):
+    """Durable overflow evidence must not merge different lost capture classes."""
+    database, _repository, _probes, _predictions, _health, supervisor = await _capture(
+        hass, tmp_path
+    )
+
+    transition, transition_regular = supervisor._ble_record(  # noqa: SLF001
+        _probe_observation(20.0, monotonic=450.0, epoch=4_500.0)
+    )
+    regular, is_regular = supervisor._ble_record(  # noqa: SLF001
+        _probe_observation(21.0, monotonic=450.1, epoch=4_500.1)
+    )
+    assert transition is not None and transition_regular is False
+    assert regular is not None and is_regular is True
+
+    supervisor._note_drop(transition, "queue_overflow")  # noqa: SLF001
+    supervisor._note_drop(regular, "queue_overflow")  # noqa: SLF001
+    await supervisor.async_stop()
+
+    gaps = await database.async_read(
+        lambda conn: conn.execute(
+            """
+            SELECT scope,dropped_count,certainty
+            FROM local_capture_gaps
+            WHERE reason='queue_overflow'
+            ORDER BY scope
+            """
+        ).fetchall()
+    )
+    assert gaps == [
+        ("regular", 1, "observed"),
+        ("transition", 1, "observed"),
+    ]
+    await database.async_stop()
+
+
+@pytest.mark.asyncio
 async def test_archive_write_failure_degrades_only_capture(
     hass: HomeAssistant,
     tmp_path: Path,

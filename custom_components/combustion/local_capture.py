@@ -107,7 +107,7 @@ class LocalCaptureSupervisor:
         self._last_regular_emitted: dict[tuple[str, str], float] = {}
         self._last_signature: dict[tuple[str, str], tuple[Any, ...]] = {}
         self._pending_gaps: dict[
-            tuple[str | None, str | None, str], _GapAccumulator
+            tuple[str | None, str | None, str, str], _GapAccumulator
         ] = {}
         self._event_ordinal = 0
         self._task: asyncio.Task[Any] | None = None
@@ -513,7 +513,12 @@ class LocalCaptureSupervisor:
 
     def _note_drop(self, record: LocalObservationRecord, reason: str) -> None:
         self.health.dropped_observations += 1
-        key = (record.subject_kind, record.raw_serial, reason)
+        key = (
+            record.subject_kind,
+            record.raw_serial,
+            record.capture_class,
+            reason,
+        )
         existing = self._pending_gaps.get(key)
         if existing is None:
             self._pending_gaps[key] = _GapAccumulator(
