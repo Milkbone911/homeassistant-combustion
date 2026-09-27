@@ -77,6 +77,7 @@ class ArchiveHealth:
     status: ArchiveStatus = ArchiveStatus.DISABLED
     schema_version: int | None = None
     sqlite_version: str = sqlite3.sqlite_version
+    wal_qualified: bool = False
     journal_mode: str | None = None
     error_category: str | None = None
     database_generation: int | None = None
@@ -209,12 +210,7 @@ class ArchiveDatabase:
             return self._metadata
 
         self.health.status = ArchiveStatus.STARTING
-        if self.require_qualified_wal and not sqlite_wal_fix_qualified():
-            self.health.status = ArchiveStatus.UNSUPPORTED
-            self.health.error_category = "sqlite_runtime"
-            raise ArchiveRuntimeUnsupported(
-                "SQLite runtime is not qualified for archive WAL operation"
-            )
+        self.health.wal_qualified = sqlite_wal_fix_qualified()
 
         self._acquire_guard()
         self._init_future = concurrent.futures.Future()
@@ -346,10 +342,23 @@ class ArchiveDatabase:
             conn.execute("PRAGMA foreign_keys=ON")
             conn.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
             conn.execute("PRAGMA synchronous=FULL")
-            mode = str(conn.execute("PRAGMA journal_mode=WAL").fetchone()[0]).lower()
-            if mode != "wal":
-                raise ArchiveRuntimeUnsupported("Archive filesystem did not enable WAL")
-            conn.execute("PRAGMA wal_autocheckpoint=0")
+            use_wal = (
+                not self.require_qualified_wal
+                or self.health.wal_qualified
+            )
+            requested_mode = "WAL" if use_wal else "DELETE"
+            mode = str(
+                conn.execute(
+                    f"PRAGMA journal_mode={requested_mode}"
+                ).fetchone()[0]
+            ).lower()
+            expected_mode = requested_mode.lower()
+            if mode != expected_mode:
+                raise ArchiveRuntimeUnsupported(
+                    "Archive filesystem did not enable the required journal mode"
+                )
+            if mode == "wal":
+                conn.execute("PRAGMA wal_autocheckpoint=0")
             self.health.journal_mode = mode
 
             if new_archive:
@@ -390,7 +399,10 @@ class ArchiveDatabase:
                 try:
                     result = command.fn(conn)
                     commands_since_checkpoint += 1
-                    if commands_since_checkpoint >= _CHECKPOINT_EVERY_COMMANDS:
+                    if (
+                        self.health.journal_mode == "wal"
+                        and commands_since_checkpoint >= _CHECKPOINT_EVERY_COMMANDS
+                    ):
                         conn.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
                         commands_since_checkpoint = 0
                 except BaseException as err:
@@ -398,7 +410,8 @@ class ArchiveDatabase:
                 else:
                     command.future.set_result(result)
 
-            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            if self.health.journal_mode == "wal":
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
             conn.close()
             conn = None
         except BaseException as err:
