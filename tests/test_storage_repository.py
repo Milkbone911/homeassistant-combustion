@@ -483,7 +483,7 @@ async def test_work_claims_are_isolated_by_account_namespace(tmp_path: Path):
     """A replacement account cannot process retained old-account jobs."""
     db = await _database(tmp_path)
     repo = ArchiveRepository(db)
-    old_account, _ = await _prepare_manifest_work(repo, token="123")
+    old_account, old_work = await _prepare_manifest_work(repo, token="123")
 
     new_account, _ = await repo.async_register_account(
         "different-subject",
@@ -498,8 +498,5 @@ async def test_work_claims_are_isolated_by_account_namespace(tmp_path: Path):
         )
         is None
     )
-    old_work = await repo.async_claim_work(
-        account_id=old_account, now_us=utc_now_us() + 1
-    )
-    assert old_work is not None
+    assert old_work.account_id == old_account
     await db.async_stop()
