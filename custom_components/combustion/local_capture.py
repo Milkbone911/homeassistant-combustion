@@ -5,6 +5,7 @@ import asyncio
 import time
 import uuid
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
@@ -142,13 +143,11 @@ class LocalCaptureSupervisor:
             self._failed = True
             self._detach_listeners()
             if self.capture_run_id is not None:
-                try:
+                with suppress(Exception):
                     await self.repository.async_finish_local_capture(
                         self.capture_run_id,
                         terminal_status="interrupted",
                     )
-                except Exception:  # noqa: BLE001 - preserve original startup failure
-                    pass
             self.health.status = LocalCaptureStatus.DEGRADED
             self.health.last_error_category = "startup"
             raise
