@@ -224,10 +224,20 @@ class ArchiveDatabase:
             metadata = await asyncio.shield(
                 asyncio.wrap_future(self._init_future)
             )
+        except asyncio.CancelledError:
+            # The writer thread cannot be killed by cancelling this await.
+            # Runtime shutdown retains ownership and explicitly drains it.
+            raise
         except BaseException:
             thread = self._thread
             if thread is not None:
                 await asyncio.to_thread(thread.join, 2.0)
+                if thread.is_alive():
+                    self.health.status = ArchiveStatus.DEGRADED
+                    self.health.error_category = "start_incomplete"
+                    raise ArchiveShutdownIncomplete(
+                        "Archive start failed while writer thread is still alive"
+                    )
             self._thread = None
             self._release_guard()
             raise
