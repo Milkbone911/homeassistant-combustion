@@ -65,6 +65,9 @@ class CombustionRuntime:
     sync_health: SyncHealth = field(default_factory=SyncHealth)
     local_capture_health: LocalCaptureHealth = field(default_factory=LocalCaptureHealth)
     source_link_health: SourceLinkHealth = field(default_factory=SourceLinkHealth)
+    statistics_projection_health: StatisticsProjectionHealth = field(
+        default_factory=StatisticsProjectionHealth
+    )
     archive_database: ArchiveDatabase | None = field(default=None, repr=False)
     archive_repository: ArchiveRepository | None = field(default=None, repr=False)
     source_link_repository: SourceLinkRepository | None = field(default=None, repr=False)
