@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 
-from custom_components.combustion.combustion_ble.mode_id import ModeId
+from custom_components.combustion.combustion_ble.mode_id import ModeId, ProbeMode
 from custom_components.combustion.combustion_ble.prediction_data import PredictionData
 from custom_components.combustion.connection_manager import ConnectionManager
 from custom_components.combustion.const import LOGGER
@@ -175,7 +175,6 @@ class PredictionManager:
                 serial,
             )
             return
-        self.probe_manager.clear_status_mode(serial)
         self._notify_listeners()
 
     @callback
@@ -196,22 +195,29 @@ class PredictionManager:
 
     def _on_status(self, serial: str, data: bytes) -> None:
         """Handle a Probe Status notification from the shared connection."""
+        if data is None or len(data) <= 21:
+            return
+
+        received_at = time.monotonic()
+        mode = ModeId.from_byte(data[21]).mode
+        self.probe_manager.update_status_mode(serial, mode, received_at)
+
+        # Combustion's official Android/iOS managers update prediction state
+        # only from Normal-mode Probe Status. Instant-Read status has its own
+        # independent data path, and interpreting its prediction bytes as
+        # current caused live inserted/not_inserted oscillation.
+        if mode != ProbeMode.normal:
+            return
+
         prediction = PredictionData.from_status_characteristic(data)
         if prediction is None:
             return
 
-        received_at = time.monotonic()
         observation = PredictionObservation(serial, received_at, prediction)
 
-        # Probe Status carries the mode/id byte at offset 21. This existing
-        # GATT stream is stronger current-mode evidence than arbitrarily
-        # interleaved advertisement copies from multiple scanners/routes.
-        mode = ModeId.from_byte(data[21]).mode
-        self.probe_manager.update_status_mode(serial, mode, received_at)
-
-        # Preserve the source observation before any entity callback. S4 can
-        # register a bounded queue offer here without adding/replacing a GATT
-        # subscription.
+        # Preserve the qualified prediction observation before any entity
+        # callback. S4 can register a bounded queue offer here without adding
+        # or replacing the sole Probe Status GATT subscription.
         self._offer_observation(observation)
 
         self.data[serial] = prediction
