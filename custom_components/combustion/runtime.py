@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Coroutine
+from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -105,12 +106,9 @@ class CombustionRuntime:
         self._optional_tasks.clear()
 
         if database is not None:
-            try:
+            # Local unload remains possible if a filesystem thread is stuck;
+            # ArchiveDatabase deliberately retains its ownership guard.
+            with suppress(ArchiveShutdownIncomplete):
                 await database.async_stop()
-            except ArchiveShutdownIncomplete:
-                # Local unload must remain possible, but ownership fencing is
-                # intentionally retained inside ArchiveDatabase until process
-                # restart. Diagnostics carry the degraded state.
-                pass
 
         self._stopped = True
