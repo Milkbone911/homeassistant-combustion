@@ -122,3 +122,84 @@ async def _existing_hour_starts(
         int(round(float(row["start"]) * 1_000_000))
         for row in existing.get(entity_id, ())
     }
+
+
+async def async_project_missing_statistics(
+    hass: HomeAssistant,
+    repository: SourceLinkRepository,
+    health: StatisticsProjectionHealth,
+) -> None:
+    """Queue only missing completed historical hours for linked probe entities."""
+    health.status = StatisticsProjectionStatus.RUNNING
+    health.queued_hours = 0
+    health.skipped_existing_hours = 0
+    health.resolved_entities = 0
+
+    try:
+        sources = await repository.async_projection_sources()
+        health.linked_sources = len(sources)
+        registry = er.async_get(hass)
+        cutoff = (
+            dt_util.utcnow().replace(minute=0, second=0, microsecond=0)
+            - _PROJECTION_LAG
+        )
+        cutoff_us = int(cutoff.timestamp() * 1_000_000)
+
+        for source in sources:
+            for field in _FIELDS:
+                entity_id = _entity_id_for_field(
+                    registry,
+                    source.local_raw_serial,
+                    field,
+                )
+                if entity_id is None:
+                    continue
+                health.resolved_entities += 1
+
+                cloud_rows = await repository.async_hourly_temperature_statistics(
+                    source.source_device_id,
+                    field,
+                    before_us=cutoff_us,
+                )
+                if not cloud_rows:
+                    continue
+
+                start = datetime_from_us(int(cloud_rows[0]["start_us"]))
+                end = datetime_from_us(int(cloud_rows[-1]["start_us"])) + timedelta(
+                    hours=1
+                )
+                existing_hours = await _existing_hour_starts(
+                    hass,
+                    entity_id,
+                    start=start,
+                    end=end,
+                )
+
+                missing: list[StatisticData] = []
+                for row in cloud_rows:
+                    start_us = int(row["start_us"])
+                    if start_us in existing_hours:
+                        health.skipped_existing_hours += 1
+                        continue
+                    missing.append(
+                        {
+                            "start": datetime_from_us(start_us),
+                            "min": float(row["min"]),
+                            "max": float(row["max"]),
+                            "mean": float(row["mean"]),
+                        }
+                    )
+
+                for offset in range(0, len(missing), _IMPORT_BATCH_SIZE):
+                    batch = missing[offset : offset + _IMPORT_BATCH_SIZE]
+                    async_import_statistics(hass, _metadata(entity_id), batch)
+                    health.queued_hours += len(batch)
+
+        health.status = StatisticsProjectionStatus.READY
+        health.last_run_us = utc_now_us()
+        health.last_error_category = None
+    except Exception:
+        health.status = StatisticsProjectionStatus.DEGRADED
+        health.last_run_us = utc_now_us()
+        health.last_error_category = "recorder"
+        raise
