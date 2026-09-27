@@ -36,6 +36,14 @@ DIRECT_DATA_PREFERENCE_SECONDS = 5.0
 # left instant-read mode or gone silent.
 INSTANT_READ_STALE_SECONDS = 15.0
 
+# Advertisement mode is not a globally ordered state stream: normal and
+# Instant Read packets can coexist through direct/proxy/MeatNet paths. Treat
+# packet-mode evidence as recent for a short bounded window; conflicting fresh
+# streams are reported as unknown unless the existing GATT Probe Status stream
+# provides a current authoritative mode.
+MODE_ADVERTISEMENT_FRESH_SECONDS = 5.0
+STATUS_MODE_FRESH_SECONDS = 15.0
+
 
 class ProbeManager:
     """Manage discovered Combustion devices."""
@@ -67,7 +75,8 @@ class ProbeManager:
         self._failed_devices: set[str] = set()
         self._known_devices: set[str] = set()
         self._latest_observation: dict[str, BluetoothObservation] = {}
-        self._current_mode_name: dict[str, str] = {}
+        self._mode_seen: dict[str, dict[ProbeMode, float]] = {}
+        self._status_mode: dict[str, tuple[ProbeMode, float]] = {}
 
     def init_sensor_platform(self, create_sensors_callback):
         """Initialize sensor platform."""
@@ -160,9 +169,9 @@ class ProbeManager:
                     return
 
             self._latest_observation[serial] = observation
-            mode_name = self._mode_name(device_data)
-            if mode_name is not None:
-                self._current_mode_name[serial] = mode_name
+            mode = getattr(device_data, "mode", None)
+            if isinstance(mode, ProbeMode):
+                self._mode_seen.setdefault(serial, {})[mode] = now
 
             # S2 capture seam: synchronous/non-awaiting and failure-isolated.
             # S4 can attach a bounded queue offer here without coupling capture
@@ -253,8 +262,55 @@ class ProbeManager:
         return value
 
     def current_mode_name(self, serial_number: str) -> str | None:
-        """Return the current selected probe mode independent of cached normal data."""
-        return self._current_mode_name.get(serial_number)
+        """Return the best-supported current mode without latest-packet flicker."""
+        now = time.monotonic()
+
+        status_entry = self._status_mode.get(serial_number)
+        if status_entry is not None:
+            status_mode, seen_at = status_entry
+            if now - seen_at < STATUS_MODE_FRESH_SECONDS:
+                return self._mode_name_from_enum(status_mode)
+
+        recent_modes = {
+            mode
+            for mode, seen_at in self._mode_seen.get(serial_number, {}).items()
+            if now - seen_at < MODE_ADVERTISEMENT_FRESH_SECONDS
+        }
+        if len(recent_modes) == 1:
+            return self._mode_name_from_enum(next(iter(recent_modes)))
+        if recent_modes:
+            # Multiple recent advertisement modes are ambiguous. Combustion's
+            # official frameworks maintain the normal and Instant Read streams
+            # independently; packet arrival order is not evidence of a physical
+            # mode transition.
+            return "unknown"
+        return None
+
+    @staticmethod
+    def _mode_name_from_enum(mode: ProbeMode) -> str:
+        """Return the Home Assistant enum value for a probe mode."""
+        return {
+            ProbeMode.normal: "normal",
+            ProbeMode.instantRead: "instant_read",
+            ProbeMode.error: "error",
+            ProbeMode.reserved: "reserved",
+        }.get(mode, "unknown")
+
+    def update_status_mode(
+        self, serial_number: str, mode: ProbeMode, received_at: float
+    ) -> None:
+        """Publish mode evidence from the existing GATT Probe Status stream."""
+        before = self.current_mode_name(serial_number)
+        self._status_mode[serial_number] = (mode, received_at)
+        if self.current_mode_name(serial_number) != before:
+            self.notify_listeners()
+
+    def clear_status_mode(self, serial_number: str) -> None:
+        """Clear stale/disconnected GATT mode evidence and refresh projection."""
+        before = self.current_mode_name(serial_number)
+        self._status_mode.pop(serial_number, None)
+        if self.current_mode_name(serial_number) != before:
+            self.notify_listeners()
 
     def latest_device_data(self, serial_number: str):
         """Latest selected parser object for diagnostic/provenance fields."""
