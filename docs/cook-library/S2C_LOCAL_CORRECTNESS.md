@@ -40,10 +40,25 @@ valid normal-mode observation arrives. After normal data exists, an instant
 transition preserves that prior normal data without presenting it as newly
 measured.
 
-The mode entity reads the separately tracked current mode rather than the
-normal-data cache. Its source/provenance attributes use the latest selected
-packet, so normal -> instant -> normal transitions remain visible while regular
-temperature freshness remains truthful.
+The mode entity no longer uses "latest advertisement wins". Live hardware
+showed that normal and Instant Read advertisement streams can be interleaved
+through direct/proxy/MeatNet paths, producing rapid false mode transitions.
+This matches the vendor SDK architecture: Combustion's Android and iOS
+frameworks arbitrate Normal and Instant Read independently and keep separate
+last-update/source-priority state.
+
+S2c therefore treats advertisement-only mode as evidence, not a total order:
+
+- one recent advertisement mode -> that mode may be projected;
+- multiple recent advertisement modes -> `unknown`, because arrival order
+  cannot prove a physical transition;
+- a fresh mode from the already-owned GATT Probe Status stream overrides
+  ambiguous advertisement evidence;
+- disconnect or status staleness removes that stronger evidence rather than
+  resurrecting an old mode.
+
+This preserves the Mode entity/unique ID while avoiding fabricated transition
+churn. Its source/provenance attributes still use the latest selected packet.
 
 ## BLE reception and selected-observation seam
 
@@ -108,7 +123,10 @@ The S2c source gate requires:
 
 - first-ever instant-read does not populate normal/core/surface/ambient values;
 - normal -> instant -> normal preserves only the last valid normal data during
-  the instant interval and tracks current mode independently;
+  the instant interval and tracks mode without latest-packet flip-flop;
+- conflicting recent normal/Instant-Read advertisement streams resolve to
+  `unknown` unless a fresh existing Probe Status notification supplies the
+  stronger current mode;
 - selected BLE observations are offered before entity-failure gating;
 - direct-over-repeated selection remains shared and unchanged;
 - listener/observer failures do not stop healthy fan-out;
@@ -139,13 +157,17 @@ hardware on the intended Home Assistant deployment:
    - confirm the Instant Read entity reports T1;
    - confirm regular core/surface/ambient/thermistor values are not fabricated
      from the instant packet;
-   - confirm the Mode entity reports `instant_read`.
+   - confirm the Mode entity reports `instant_read` when evidence is
+     unambiguous; `unknown` is truthful if conflicting recent advertisement
+     streams exist before a fresh Probe Status notification.
 
 2. **Normal -> instant -> normal**
    - observe valid normal values;
    - enter instant-read mode;
    - confirm normal values do not jump to invalid instant-mode T2-T8 values;
-   - confirm current mode changes to `instant_read`;
+   - confirm Mode does not oscillate rapidly between `normal` and
+     `instant_read`; a short `unknown` ambiguity interval is acceptable
+     until stale advertisement evidence clears or fresh Probe Status resolves it;
    - return to normal mode and confirm new normal readings resume.
 
 3. **Fresh -> stale prediction**
