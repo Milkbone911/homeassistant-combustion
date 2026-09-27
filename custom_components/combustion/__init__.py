@@ -26,15 +26,18 @@ from .const import (
     CONF_CLOUD_SYNC_ENABLED,
     CONF_ENABLE_ACTIVE_CONNECTION,
     CONF_HISTORY_ENABLED,
+    CONF_LOCAL_CAPTURE_ENABLED,
     CONF_UPDATE_THROTTLE,
     DEFAULT_AVAILABILITY_TIMEOUT,
     DEFAULT_CLOUD_SYNC_ENABLED,
     DEFAULT_ENABLE_ACTIVE_CONNECTION,
     DEFAULT_HISTORY_ENABLED,
+    DEFAULT_LOCAL_CAPTURE_ENABLED,
     DEFAULT_UPDATE_THROTTLE,
     DOMAIN,
     LOGGER,
 )
+from .local_capture import LocalCaptureStatus, LocalCaptureSupervisor
 from .reconciliation.sync import CloudSyncSupervisor, SyncStatus
 from .runtime import CombustionRuntime
 from .storage.database import (
@@ -129,6 +132,7 @@ async def _async_start_archive(
     runtime: CombustionRuntime,
     *,
     cloud_sync_enabled: bool,
+    local_capture_enabled: bool,
 ) -> None:
     """Start optional archive/sync without allowing failure to gate local BLE."""
     fingerprint = await hass.async_add_executor_job(_package_fingerprint_sync)
@@ -172,10 +176,32 @@ async def _async_start_archive(
         LOGGER.exception("Unexpected Combustion archive startup failure")
 
     if runtime.archive_health.status is not ArchiveStatus.READY:
+        if local_capture_enabled:
+            runtime.local_capture_health.status = LocalCaptureStatus.DEGRADED
+            runtime.local_capture_health.last_error_category = "archive_unavailable"
         # Archive failure never removes basic cloud-link health from diagnostics.
         if cloud_linked(entry.data):
             await async_check_linked_account(hass, entry, runtime.cloud_health)
         return
+
+    if local_capture_enabled:
+        assert runtime.archive_repository is not None
+        capture = LocalCaptureSupervisor(
+            hass,
+            entry,
+            runtime.archive_repository,
+            runtime.probe_manager,
+            runtime.prediction_manager,
+            runtime.local_capture_health,
+        )
+        runtime.local_capture_supervisor = capture
+        try:
+            await capture.async_start()
+        except Exception:  # noqa: BLE001 - capture must not gate archive/cloud
+            runtime.local_capture_health.status = LocalCaptureStatus.DEGRADED
+            runtime.local_capture_health.last_error_category = "startup"
+    else:
+        runtime.local_capture_health.status = LocalCaptureStatus.DISABLED
 
     if not cloud_sync_enabled:
         return
@@ -219,6 +245,12 @@ async def async_setup_entry(
     )
     history_enabled = bool(
         entry.options.get(CONF_HISTORY_ENABLED, DEFAULT_HISTORY_ENABLED)
+    )
+    local_capture_enabled = bool(
+        entry.options.get(
+            CONF_LOCAL_CAPTURE_ENABLED,
+            DEFAULT_LOCAL_CAPTURE_ENABLED,
+        )
     )
     cloud_sync_enabled = bool(
         entry.options.get(CONF_CLOUD_SYNC_ENABLED, DEFAULT_CLOUD_SYNC_ENABLED)
@@ -273,11 +305,19 @@ async def async_setup_entry(
                 entry,
                 runtime,
                 cloud_sync_enabled=cloud_sync_enabled,
+                local_capture_enabled=local_capture_enabled,
             ),
             "combustion-archive-start",
         )
     else:
         runtime.archive_health.status = ArchiveStatus.DISABLED
+        runtime.local_capture_health.status = (
+            LocalCaptureStatus.DEGRADED
+            if local_capture_enabled
+            else LocalCaptureStatus.DISABLED
+        )
+        if local_capture_enabled:
+            runtime.local_capture_health.last_error_category = "history_disabled"
         if cloud_sync_enabled:
             runtime.sync_health.status = SyncStatus.DEGRADED
             runtime.sync_health.last_error_category = "history_disabled"
