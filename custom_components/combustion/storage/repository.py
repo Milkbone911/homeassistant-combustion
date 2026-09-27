@@ -11,13 +11,22 @@ from typing import Any
 from ..cloud.client import IndexTraversal
 from ..cloud.models import Probe, SampleRow, SessionMeta, normalize_ranges
 from .database import ArchiveDatabase
-from .schema import canonical_json, content_hash, parse_utc_us, utc_now_us
+from .schema import (
+    ArchiveSchemaError,
+    canonical_json,
+    content_hash,
+    parse_utc_us,
+    utc_now_us,
+)
 
 _ACCOUNT_NS = uuid.UUID("ad0d4ca4-3791-48ee-998f-96cba4712f65")
 _SOURCE_NS = uuid.UUID("9ff4e1be-802e-4ef1-a1c9-a09943a935e0")
 _SESSION_NS = uuid.UUID("08aa1f1b-6f73-42ce-a67e-ef52d2e61f33")
 _MANIFEST_NS = uuid.UUID("30c11718-5a92-465b-a4cb-0f2c49df013a")
 _VERSION_NS = uuid.UUID("2e762711-c4ca-48c6-b6fc-a232735af9a7")
+_LOCAL_SOURCE_NS = uuid.uuid5(uuid.NAMESPACE_URL, "combustion:s4:local-source")
+_LOCAL_CAPTURE_NS = uuid.uuid5(uuid.NAMESPACE_URL, "combustion:s4:capture-run")
+_LOCAL_OBSERVATION_NS = uuid.uuid5(uuid.NAMESPACE_URL, "combustion:s4:observation")
 
 MANIFEST_RECHECK_US = 6 * 60 * 60 * 1_000_000
 FULL_AUDIT_INTERVAL_US = 7 * 24 * 60 * 60 * 1_000_000
@@ -65,6 +74,47 @@ class ManifestRecord:
     ranges: tuple[tuple[int, int], ...]
 
 
+@dataclass(frozen=True, slots=True)
+class LocalObservationRecord:
+    """One immutable selected local observation offered to the archive."""
+
+    observation_id: str
+    capture_run_id: str
+    subject_kind: str
+    raw_serial: str
+    event_ordinal: int
+    observation_kind: str
+    capture_class: str
+    received_at_us: int
+    received_monotonic_ns: int
+    route_kind: str
+    freshness_basis: str
+    valid_fields: tuple[str, ...]
+    payload: Mapping[str, Any]
+    upstream_time: float | None = None
+    source_address: str | None = None
+    scanner_source: str | None = None
+    rssi: float | int | None = None
+    connectable: bool | None = None
+    mode_name: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class LocalCaptureGapRecord:
+    """Explicit local-capture loss or uncertainty evidence."""
+
+    gap_id: str
+    capture_run_id: str | None
+    scope: str
+    reason: str
+    first_lost_at_us: int
+    last_lost_at_us: int
+    dropped_count: int | None
+    certainty: str
+    subject_kind: str | None = None
+    raw_serial: str | None = None
+
+
 FaultInjector = Callable[[str], None]
 
 
@@ -88,6 +138,25 @@ def _manifest_identity(session_id: str, metadata_hash: str) -> str:
 
 def _version_identity(session_id: str, sequence: int, payload_hash: str) -> str:
     return str(uuid.uuid5(_VERSION_NS, f"{session_id}:{sequence}:{payload_hash}"))
+
+
+def local_source_identity(subject_kind: str, raw_serial: str) -> str:
+    """Return an identity scoped only to the local observation namespace."""
+    return str(uuid.uuid5(_LOCAL_SOURCE_NS, f"{subject_kind}:{raw_serial}"))
+
+
+def local_capture_identity(runtime_generation: str) -> str:
+    """Return the deterministic capture-run identity for one runtime generation."""
+    return str(uuid.uuid5(_LOCAL_CAPTURE_NS, runtime_generation))
+
+
+def local_observation_identity(runtime_generation: str, event_ordinal: int) -> str:
+    """Assign a stable local event identity before persistence/retry."""
+    if event_ordinal < 0:
+        raise ValueError("event_ordinal must be nonnegative")
+    return str(
+        uuid.uuid5(_LOCAL_OBSERVATION_NS, f"{runtime_generation}:{event_ordinal}")
+    )
 
 
 def _tx(conn: sqlite3.Connection):
@@ -1335,6 +1404,330 @@ class ArchiveRepository:
             }
 
         return await self.database.async_write(write)
+
+    async def async_begin_local_capture(
+        self,
+        *,
+        runtime_generation: str,
+        policy_version: int = 1,
+        regular_interval_ms: int = 1000,
+    ) -> str:
+        """Persist one runtime-owned local capture interval."""
+        if not runtime_generation:
+            raise ValueError("runtime_generation is required")
+        if policy_version < 1 or regular_interval_ms < 1:
+            raise ValueError("Invalid local capture policy")
+        capture_run_id = local_capture_identity(runtime_generation)
+        now = utc_now_us()
+
+        def write(conn: sqlite3.Connection) -> str:
+            with _tx(conn):
+                existing = conn.execute(
+                    """
+                    SELECT policy_version,regular_interval_ms,terminal_status
+                    FROM local_capture_runs WHERE capture_run_id=?
+                    """,
+                    (capture_run_id,),
+                ).fetchone()
+                if existing is not None:
+                    if (
+                        int(existing[0]) != policy_version
+                        or int(existing[1]) != regular_interval_ms
+                        or str(existing[2]) != "running"
+                    ):
+                        raise ArchiveSchemaError(
+                            "Local capture generation was reused inconsistently"
+                        )
+                    return capture_run_id
+                conn.execute(
+                    """
+                    INSERT INTO local_capture_runs(
+                        capture_run_id,runtime_generation,started_at_us,ended_at_us,
+                        terminal_status,policy_version,regular_interval_ms
+                    ) VALUES(?,?,?,NULL,'running',?,?)
+                    """,
+                    (
+                        capture_run_id,
+                        runtime_generation,
+                        now,
+                        policy_version,
+                        regular_interval_ms,
+                    ),
+                )
+            return capture_run_id
+
+        return await self.database.async_write(write)
+
+    async def async_finish_local_capture(
+        self,
+        capture_run_id: str,
+        *,
+        terminal_status: str = "clean",
+    ) -> None:
+        """Close one local capture interval without deleting retained evidence."""
+        if terminal_status not in {"clean", "interrupted"}:
+            raise ValueError("Invalid local capture terminal status")
+        now = utc_now_us()
+
+        def write(conn: sqlite3.Connection) -> None:
+            with _tx(conn):
+                cursor = conn.execute(
+                    """
+                    UPDATE local_capture_runs
+                    SET ended_at_us=?,terminal_status=?
+                    WHERE capture_run_id=? AND terminal_status='running'
+                    """,
+                    (now, terminal_status, capture_run_id),
+                )
+                if cursor.rowcount != 1:
+                    raise ArchiveSchemaError("Local capture run is not active")
+
+        await self.database.async_write(write)
+
+    async def async_commit_local_observations(
+        self,
+        observations: Sequence[LocalObservationRecord],
+    ) -> int:
+        """Atomically persist immutable local observations; retries are idempotent."""
+        if not observations:
+            return 0
+        committed_at = utc_now_us()
+
+        def write(conn: sqlite3.Connection) -> int:
+            inserted = 0
+            with _tx(conn):
+                for observation in observations:
+                    if observation.subject_kind not in {"probe", "gauge", "node"}:
+                        raise ArchiveSchemaError(
+                            "Local observation subject kind is unsupported"
+                        )
+                    if observation.observation_kind not in {"ble", "prediction"}:
+                        raise ArchiveSchemaError(
+                            "Local observation kind is unsupported"
+                        )
+                    if observation.capture_class not in {
+                        "regular",
+                        "transition",
+                        "prediction",
+                    }:
+                        raise ArchiveSchemaError(
+                            "Local capture class is unsupported"
+                        )
+                    if (
+                        observation.event_ordinal < 0
+                        or observation.received_at_us < 0
+                        or observation.received_monotonic_ns < 0
+                    ):
+                        raise ArchiveSchemaError(
+                            "Local observation timing/ordinal is invalid"
+                        )
+
+                    source_id = local_source_identity(
+                        observation.subject_kind,
+                        observation.raw_serial,
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO local_sources(
+                            local_source_id,subject_kind,raw_serial,
+                            first_seen_us,last_seen_us
+                        ) VALUES(?,?,?,?,?)
+                        ON CONFLICT(local_source_id) DO UPDATE SET
+                            last_seen_us=MAX(last_seen_us,excluded.last_seen_us)
+                        """,
+                        (
+                            source_id,
+                            observation.subject_kind,
+                            observation.raw_serial,
+                            observation.received_at_us,
+                            observation.received_at_us,
+                        ),
+                    )
+
+                    retained = {
+                        "subject_kind": observation.subject_kind,
+                        "raw_serial": observation.raw_serial,
+                        "observation_kind": observation.observation_kind,
+                        "capture_class": observation.capture_class,
+                        "received_at_us": observation.received_at_us,
+                        "received_monotonic_ns": observation.received_monotonic_ns,
+                        "upstream_time": observation.upstream_time,
+                        "source_address": observation.source_address,
+                        "scanner_source": observation.scanner_source,
+                        "rssi": observation.rssi,
+                        "connectable": observation.connectable,
+                        "route_kind": observation.route_kind,
+                        "mode_name": observation.mode_name,
+                        "freshness_basis": observation.freshness_basis,
+                        "valid_fields": sorted(set(observation.valid_fields)),
+                        "payload": dict(observation.payload),
+                    }
+                    payload_hash = content_hash(retained)
+                    existing = conn.execute(
+                        """
+                        SELECT payload_hash FROM local_observations
+                        WHERE observation_id=?
+                        """,
+                        (observation.observation_id,),
+                    ).fetchone()
+                    if existing is not None:
+                        if str(existing[0]) != payload_hash:
+                            raise ArchiveSchemaError(
+                                "Local observation identity conflict"
+                            )
+                        continue
+
+                    fields = observation.payload
+                    temperatures = tuple(fields.get(f"t{index}") for index in range(1, 9))
+                    conn.execute(
+                        """
+                        INSERT INTO local_observations(
+                            observation_id,capture_run_id,local_source_id,event_ordinal,
+                            observation_kind,capture_class,received_at_us,
+                            received_monotonic_ns,upstream_time,source_address,
+                            scanner_source,rssi,connectable,route_kind,mode_name,
+                            freshness_basis,valid_field_mask,payload_hash,
+                            t1,t2,t3,t4,t5,t6,t7,t8,
+                            virtual_core,virtual_surface,virtual_ambient,
+                            estimated_core_temperature,prediction_set_point,
+                            prediction_state,prediction_mode,prediction_type,
+                            prediction_value_seconds,raw_json,committed_at_us
+                        ) VALUES(
+                            ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
+                            ?,?,?,?,?,?,?,?,
+                            ?,?,?,?,?,?,?,?,?,?,?
+                        )
+                        """,
+                        (
+                            observation.observation_id,
+                            observation.capture_run_id,
+                            source_id,
+                            observation.event_ordinal,
+                            observation.observation_kind,
+                            observation.capture_class,
+                            observation.received_at_us,
+                            observation.received_monotonic_ns,
+                            observation.upstream_time,
+                            observation.source_address,
+                            observation.scanner_source,
+                            observation.rssi,
+                            (
+                                None
+                                if observation.connectable is None
+                                else int(observation.connectable)
+                            ),
+                            observation.route_kind,
+                            observation.mode_name,
+                            observation.freshness_basis,
+                            ",".join(sorted(set(observation.valid_fields))),
+                            payload_hash,
+                            *temperatures,
+                            fields.get("virtual_core"),
+                            fields.get("virtual_surface"),
+                            fields.get("virtual_ambient"),
+                            fields.get("estimated_core_temperature"),
+                            fields.get("prediction_set_point"),
+                            fields.get("prediction_state"),
+                            fields.get("prediction_mode"),
+                            fields.get("prediction_type"),
+                            fields.get("prediction_value_seconds"),
+                            canonical_json(retained),
+                            committed_at,
+                        ),
+                    )
+                    inserted += 1
+            return inserted
+
+        return await self.database.async_write(write)
+
+    async def async_record_local_capture_gap(
+        self,
+        gap: LocalCaptureGapRecord,
+    ) -> None:
+        """Persist one observed or uncertain local-capture loss interval."""
+        if gap.certainty not in {"observed", "uncertain"}:
+            raise ValueError("Invalid local capture gap certainty")
+        if gap.last_lost_at_us < gap.first_lost_at_us:
+            raise ValueError("Invalid local capture gap interval")
+        if gap.dropped_count is not None and gap.dropped_count < 1:
+            raise ValueError("Invalid local capture dropped count")
+        if (gap.subject_kind is None) != (gap.raw_serial is None):
+            raise ValueError("Local capture gap subject is incomplete")
+        now = utc_now_us()
+
+        def write(conn: sqlite3.Connection) -> None:
+            with _tx(conn):
+                source_id = None
+                if gap.subject_kind is not None and gap.raw_serial is not None:
+                    if gap.subject_kind not in {"probe", "gauge", "node"}:
+                        raise ArchiveSchemaError(
+                            "Local capture gap subject kind is unsupported"
+                        )
+                    source_id = local_source_identity(
+                        gap.subject_kind,
+                        gap.raw_serial,
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO local_sources(
+                            local_source_id,subject_kind,raw_serial,
+                            first_seen_us,last_seen_us
+                        ) VALUES(?,?,?,?,?)
+                        ON CONFLICT(local_source_id) DO UPDATE SET
+                            last_seen_us=MAX(last_seen_us,excluded.last_seen_us)
+                        """,
+                        (
+                            source_id,
+                            gap.subject_kind,
+                            gap.raw_serial,
+                            gap.first_lost_at_us,
+                            gap.last_lost_at_us,
+                        ),
+                    )
+                conn.execute(
+                    """
+                    INSERT INTO local_capture_gaps(
+                        gap_id,capture_run_id,local_source_id,scope,reason,
+                        first_lost_at_us,last_lost_at_us,dropped_count,
+                        certainty,created_at_us
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?)
+                    ON CONFLICT(gap_id) DO NOTHING
+                    """,
+                    (
+                        gap.gap_id,
+                        gap.capture_run_id,
+                        source_id,
+                        gap.scope,
+                        gap.reason,
+                        gap.first_lost_at_us,
+                        gap.last_lost_at_us,
+                        gap.dropped_count,
+                        gap.certainty,
+                        now,
+                    ),
+                )
+
+        await self.database.async_write(write)
+
+    async def async_local_capture_counts(self) -> Mapping[str, int]:
+        """Return bounded S4 local-capture counts for diagnostics/tests."""
+        def read(conn: sqlite3.Connection):
+            return {
+                "sources": int(
+                    conn.execute("SELECT COUNT(*) FROM local_sources").fetchone()[0]
+                ),
+                "runs": int(
+                    conn.execute("SELECT COUNT(*) FROM local_capture_runs").fetchone()[0]
+                ),
+                "observations": int(
+                    conn.execute("SELECT COUNT(*) FROM local_observations").fetchone()[0]
+                ),
+                "gaps": int(
+                    conn.execute("SELECT COUNT(*) FROM local_capture_gaps").fetchone()[0]
+                ),
+            }
+
+        return await self.database.async_read(read)
 
     async def async_queue_counts(self) -> Mapping[str, int]:
         """Return bounded operational work counts."""
