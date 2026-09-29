@@ -722,13 +722,30 @@ class ProjectionRepository:
                 rows = conn.execute(
                     """
                     SELECT
-                        projection_row_id,statistic_id,hour_start_us,
-                        source_revision_hash,min_value,max_value,mean_value,
-                        known_duration_us,sample_count,state
-                    FROM projection_rows
-                    WHERE projection_job_id=?
-                      AND state IN ('planned','queued','failed')
-                    ORDER BY statistic_id,hour_start_us
+                        current.projection_row_id,
+                        current.statistic_id,
+                        current.hour_start_us,
+                        current.source_revision_hash,
+                        current.min_value,
+                        current.max_value,
+                        current.mean_value,
+                        current.known_duration_us,
+                        current.sample_count,
+                        current.state,
+                        current.last_error,
+                        EXISTS(
+                            SELECT 1 FROM projection_rows AS prior
+                            WHERE prior.statistic_id=current.statistic_id
+                              AND prior.hour_start_us=current.hour_start_us
+                              AND prior.projection_row_id!=current.projection_row_id
+                              AND prior.state IN ('confirmed','superseded')
+                        )
+                    FROM projection_rows AS current
+                    WHERE current.projection_job_id=?
+                      AND current.state IN (
+                          'planned','submitting','queued','failed'
+                      )
+                    ORDER BY current.statistic_id,current.hour_start_us
                     """,
                     (job_id,),
                 ).fetchall()
@@ -748,11 +765,43 @@ class ProjectionRepository:
                     "known_duration_us": int(row[7]),
                     "sample_count": int(row[8]),
                     "state": str(row[9]),
+                    "last_error": None if row[10] is None else str(row[10]),
+                    "prior_owned": bool(row[11]),
                 }
                 for row in rows
             )
 
         return await self.database.async_write(write)
+
+    async def async_mark_rows_submitting(
+        self,
+        job_id: str,
+        row_ids: Sequence[str],
+    ) -> None:
+        """Persist an uncertain submission boundary before Recorder enqueue."""
+        if not row_ids:
+            return
+        now = utc_now_us()
+
+        def write(conn: sqlite3.Connection) -> None:
+            conn.executemany(
+                """
+                UPDATE projection_rows
+                SET state='submitting',last_error=NULL,updated_at_us=?
+                WHERE projection_job_id=? AND projection_row_id=?
+                  AND state IN ('planned','failed','submitting')
+                """,
+                ((now, job_id, row_id) for row_id in row_ids),
+            )
+            conn.execute(
+                """
+                UPDATE projection_jobs SET updated_at_us=?
+                WHERE projection_job_id=? AND state='running'
+                """,
+                (now, job_id),
+            )
+
+        await self.database.async_write(write)
 
     async def async_mark_rows_queued(
         self,
@@ -772,7 +821,7 @@ class ProjectionRepository:
                     UPDATE projection_rows
                     SET state='queued',last_error=NULL,updated_at_us=?
                     WHERE projection_job_id=? AND projection_row_id=?
-                      AND state IN ('planned','failed','queued')
+                      AND state IN ('submitting','queued')
                     """,
                     ((now, job_id, row_id) for row_id in row_ids),
                 )
@@ -1007,6 +1056,79 @@ class ProjectionRepository:
             )
 
         return await self.database.async_write(write)
+
+    async def async_complete_empty_job(self, job_id: str) -> ProjectionJob:
+        """Confirm a valid dry-run that contains no writable rows."""
+        now = utc_now_us()
+
+        def write(conn: sqlite3.Connection) -> None:
+            row = conn.execute(
+                """
+                SELECT planned_rows,state FROM projection_jobs
+                WHERE projection_job_id=?
+                """,
+                (job_id,),
+            ).fetchone()
+            if row is None:
+                raise ProjectionPlanError("Projection job not found")
+            if int(row[0]) != 0:
+                raise ProjectionPlanError("Projection job is not empty")
+            conn.execute(
+                """
+                UPDATE projection_jobs
+                SET state='confirmed',updated_at_us=?,error_category=NULL
+                WHERE projection_job_id=?
+                """,
+                (now, job_id),
+            )
+
+        await self.database.async_write(write)
+        job = await self.async_get_job(job_id)
+        assert job is not None
+        return job
+
+    async def async_cancel_job(self, job_id: str) -> ProjectionJob:
+        """Cancel unconfirmed work without rewriting confirmed rows."""
+        now = utc_now_us()
+
+        def write(conn: sqlite3.Connection) -> None:
+            row = conn.execute(
+                "SELECT state FROM projection_jobs WHERE projection_job_id=?",
+                (job_id,),
+            ).fetchone()
+            if row is None:
+                raise ProjectionPlanError("Projection job not found")
+            if row[0] == "confirmed":
+                raise ProjectionPlanError("Confirmed projection job cannot be cancelled")
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                conn.execute(
+                    """
+                    UPDATE projection_rows
+                    SET state='cancelled',last_error='cancelled',updated_at_us=?
+                    WHERE projection_job_id=?
+                      AND state NOT IN ('confirmed','superseded')
+                    """,
+                    (now, job_id),
+                )
+                conn.execute(
+                    """
+                    UPDATE projection_jobs
+                    SET state='cancelled',updated_at_us=?,
+                        error_category='cancelled'
+                    WHERE projection_job_id=?
+                    """,
+                    (now, job_id),
+                )
+                conn.execute("COMMIT")
+            except BaseException:
+                conn.execute("ROLLBACK")
+                raise
+
+        await self.database.async_write(write)
+        job = await self.async_get_job(job_id)
+        assert job is not None
+        return job
 
     async def async_recover_incomplete_jobs(self) -> int:
         """Mark abandoned running jobs partial without inventing completion."""
