@@ -34,7 +34,6 @@ _FIELD_SUFFIX = {
     "virtual_ambient": "ambient_temperature",
     **{f"t{index}": f"temperature_{index}" for index in range(1, 9)},
 }
-_PROJECTION_NS = uuid.uuid5(uuid.NAMESPACE_URL, "combustion:s5:external-statistics")
 
 
 @dataclass(frozen=True, slots=True)
@@ -191,8 +190,11 @@ def _plan_rows_sync(
     summary["active_links"] = len(link_rows)
 
     by_local: dict[str, list[tuple[str, str, str, str]]] = defaultdict(list)
+    canonical_counts: dict[str, int] = defaultdict(int)
     for row in link_rows:
-        by_local[str(row[2])].append(tuple(str(item) for item in row))
+        normalized = tuple(str(item) for item in row)
+        by_local[str(row[2])].append(normalized)
+        canonical_counts[str(row[3])] += 1
 
     segments: dict[tuple[str, str, int], list[_Segment]] = defaultdict(list)
     row_owner: dict[tuple[str, str, int], tuple[str, str]] = {}
@@ -204,6 +206,9 @@ def _plan_rows_sync(
         identity_link_id, source_device_id, _local_source_id, canonical_serial = (
             local_links[0]
         )
+        if canonical_counts[canonical_serial] != 1:
+            summary["ambiguous_link_groups"] += 1
+            continue
 
         sessions = conn.execute(
             """
@@ -349,9 +354,14 @@ def _plan_rows_sync(
                 WHERE samples.session_id=?
                   AND versions.sampled_at_us>=?
                   AND versions.sampled_at_us<?
+                  AND EXISTS(
+                      SELECT 1 FROM manifest_ranges AS ranges
+                      WHERE ranges.manifest_id=?
+                        AND samples.sequence BETWEEN ranges.start_seq AND ranges.end_seq
+                  )
                 ORDER BY samples.sequence
                 """,
-                (session_id, window_start, requested_end_us),
+                (session_id, window_start, requested_end_us, manifest_id),
             ).fetchall()
             if not selected:
                 continue
@@ -487,13 +497,7 @@ def _plan_rows_sync(
         identity_link_id, source_device_id = row_owner[
             (statistic_id, field, hour_start)
         ]
-        row_id = str(
-            uuid.uuid5(
-                _PROJECTION_NS,
-                f"{statistic_id}:{hour_start}:{revision_hash}:"
-                f"{PROJECTION_ALGORITHM_VERSION}",
-            )
-        )
+        row_id = str(uuid.uuid4())
         planned.append(
             ProjectionPlanRow(
                 projection_row_id=row_id,
