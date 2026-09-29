@@ -230,99 +230,18 @@ async def test_s5_source_links_websocket_reconciles_and_refreshes_health(
 
 
 @pytest.mark.asyncio
-async def test_s5_projection_refuses_ambiguous_source_identity(
+async def test_s5_projection_websocket_fails_closed_during_hardening(
     hass: HomeAssistant,
     hass_ws_client,
 ):
-    """No Recorder writes are attempted while exact source identity is ambiguous."""
-    entry = await _loaded_entry(hass)
-    runtime = entry.runtime_data
-    runtime.archive_health.status = ArchiveStatus.READY
-    runtime.archive_database = AsyncMock()
-
-    repository = AsyncMock()
-    repository.async_counts.return_value = {
-        "cloud_probe_sources": 1,
-        "local_probe_sources": 2,
-        "active_links": 0,
-        "total_links": 0,
-        "unresolved_cloud_sources": 0,
-        "ambiguous_cloud_sources": 1,
-    }
-
-    with (
-        patch(
-            "custom_components.combustion.websocket_api.SourceLinkRepository",
-            return_value=repository,
-        ),
-        patch(
-            "custom_components.combustion.websocket_api.async_project_missing_statistics",
-            new_callable=AsyncMock,
-        ) as project,
-    ):
-        client = await hass_ws_client(hass)
-        await client.send_json_auto_id(
-            {"type": "combustion/archive/project_statistics"}
-        )
-        response = await client.receive_json()
+    """No Recorder mutation API is available before the projection gate passes."""
+    await _loaded_entry(hass)
+    client = await hass_ws_client(hass)
+    await client.send_json_auto_id(
+        {"type": "combustion/archive/project_statistics"}
+    )
+    response = await client.receive_json()
 
     assert response["success"] is False
     assert response["error"]["code"] == "not_supported"
-    project.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_s5_projection_websocket_queues_fill_only_projection(
-    hass: HomeAssistant,
-    hass_ws_client,
-):
-    """Admin projection reconciles links first and returns aggregate queue results."""
-    entry = await _loaded_entry(hass)
-    runtime = entry.runtime_data
-    runtime.archive_health.status = ArchiveStatus.READY
-    runtime.archive_database = AsyncMock()
-
-    repository = AsyncMock()
-    repository.async_counts.return_value = {
-        "cloud_probe_sources": 1,
-        "local_probe_sources": 1,
-        "active_links": 1,
-        "total_links": 1,
-        "unresolved_cloud_sources": 0,
-        "ambiguous_cloud_sources": 0,
-    }
-
-    async def project(_hass, _repository, health):
-        health.status = "ready"
-        health.linked_sources = 1
-        health.resolved_entities = 3
-        health.queued_hours = 12
-        health.skipped_existing_hours = 8
-        health.last_run_us = 123
-
-    with (
-        patch(
-            "custom_components.combustion.websocket_api.SourceLinkRepository",
-            return_value=repository,
-        ),
-        patch(
-            "custom_components.combustion.websocket_api.async_project_missing_statistics",
-            side_effect=project,
-        ) as project_mock,
-    ):
-        client = await hass_ws_client(hass)
-        await client.send_json_auto_id(
-            {"type": "combustion/archive/project_statistics"}
-        )
-        response = await client.receive_json()
-
-    assert response["success"] is True
-    assert response["result"] == {
-        "status": "ready",
-        "linked_sources": 1,
-        "resolved_entities": 3,
-        "queued_hours": 12,
-        "skipped_existing_hours": 8,
-        "last_run_us": 123,
-    }
-    project_mock.assert_awaited_once()
+    assert "disabled pending S5 hardening" in response["error"]["message"]
