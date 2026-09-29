@@ -88,7 +88,7 @@ def _compatible_metadata(
         return _expected_metadata(statistic_id)
     if existing["statistic_id"] != statistic_id or existing["source"] != "combustion":
         raise ProjectionExecutionError("Projection statistic ownership mismatch")
-    if existing["has_sum"] or existing["mean_type"] is not StatisticMeanType.ARITHMETIC:
+    if existing["has_sum"] or existing["mean_type"] != StatisticMeanType.ARITHMETIC:
         raise ProjectionExecutionError("Projection statistic semantics mismatch")
     if existing["unit_class"] != TemperatureConverter.UNIT_CLASS:
         raise ProjectionExecutionError("Projection statistic unit class mismatch")
