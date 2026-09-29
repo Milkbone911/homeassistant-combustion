@@ -10,6 +10,7 @@ import pytest
 from custom_components.combustion.cloud.client import IndexTraversal
 from custom_components.combustion.cloud.ha import CloudLinkChangedError, CloudLinkHealth
 from custom_components.combustion.cloud.models import (
+    CloudSchemaError,
     CloudTransportError,
     IndexPage,
     Probe,
@@ -297,6 +298,85 @@ async def test_discovery_failure_on_one_probe_does_not_block_later_probe(
     ]
     assert evidence[1] == 1
     assert supervisor.health.last_error_category == "discovery_transport"
+    await database.async_stop()
+
+
+@pytest.mark.asyncio
+async def test_unsupported_session_token_is_durably_classified(
+    tmp_path: Path, monkeypatch
+):
+    """Provider token incompatibility cannot strand claimed work as running."""
+    database, repository = await _archive(tmp_path)
+    account_id, sources = await repository.async_register_account(
+        "subject-a",
+        1,
+        [Probe("probe-a", "provider-locator")],
+    )
+    source = sources["probe-a"]
+    run_id = await repository.async_begin_discovery(
+        account_id=account_id,
+        generation=1,
+        source=source,
+    )
+    opaque = SessionIndex(
+        source_session_token="opaque-token",
+        index_id="opaque-index",
+        serial="probe-a",
+        uid=None,
+        device_type=1,
+        sample_period_ms=5000,
+        started_at="2026-01-01T00:00:00Z",
+        ended_at=None,
+        advertised_ranges=((0, 1),),
+        raw={
+            "device_session_id": "opaque-token",
+            "sample_period": 5000,
+            "sequence_number_ranges": [[0, 1]],
+        },
+    )
+    await repository.async_record_discovery_page(
+        run_id=run_id,
+        source=source,
+        page=IndexPage(1, 1, 1, (opaque,)),
+        digest="opaque-digest",
+    )
+    await repository.async_finish_discovery(
+        run_id,
+        complete=True,
+        terminal_reason="declared_total_pages",
+    )
+
+    client = _FakeCloudClient()
+    entry = _entry()
+    monkeypatch.setattr(
+        sync_module,
+        "create_linked_cloud_client",
+        lambda _hass, _entry: (client, 1, "subject-a"),
+    )
+    supervisor = CloudSyncSupervisor(
+        MagicMock(),
+        entry,
+        repository,
+        CloudLinkHealth(),
+        SyncHealth(),
+    )
+
+    with pytest.raises(CloudSchemaError):
+        await supervisor.async_sync_cycle(
+            force_context_refresh=True,
+            max_work=1,
+        )
+
+    state = await database.async_read(
+        lambda conn: conn.execute(
+            """
+            SELECT state,attempts,last_error
+            FROM sync_work
+            WHERE kind='manifest'
+            """
+        ).fetchone()
+    )
+    assert state == ("ready", 1, "schema")
     await database.async_stop()
 
 
