@@ -260,7 +260,7 @@ def _apply_health(
     )
 
 
-async def async_execute_projection_job(
+async def _async_execute_projection_job(
     hass: HomeAssistant,
     repository: ProjectionRepository,
     health: StatisticsProjectionHealth,
@@ -402,3 +402,41 @@ async def async_execute_projection_job(
             raise ProjectionExecutionError("Projection job disappeared")
         _apply_health(health, job)
         return job
+
+
+async def async_execute_projection_job(
+    hass: HomeAssistant,
+    repository: ProjectionRepository,
+    health: StatisticsProjectionHealth,
+    execution_lock: asyncio.Lock,
+    job_id: str,
+) -> ProjectionJob:
+    """Execute with crash-safe job state and sanitized runtime health."""
+    try:
+        return await _async_execute_projection_job(
+            hass,
+            repository,
+            health,
+            execution_lock,
+            job_id,
+        )
+    except asyncio.CancelledError:
+        health.status = StatisticsProjectionStatus.PARTIAL
+        health.active_job_id = job_id
+        health.last_run_us = utc_now_us()
+        health.last_error_category = "interrupted"
+        raise
+    except Exception:
+        try:
+            job = await repository.async_mark_job_partial(
+                job_id,
+                category="execution_error",
+            )
+        except Exception:
+            health.status = StatisticsProjectionStatus.DEGRADED
+            health.active_job_id = job_id
+            health.last_run_us = utc_now_us()
+            health.last_error_category = "ledger_error"
+            raise
+        _apply_health(health, job)
+        raise
