@@ -433,6 +433,95 @@ async def test_permanent_early_hole_does_not_starve_forward_acquisition(
 
 
 @pytest.mark.asyncio
+async def test_empty_audit_response_does_not_claim_fresh_complete_source(
+    tmp_path: Path,
+):
+    """Retained archive coverage is distinct from rows re-observed by an audit."""
+    db = await _database(tmp_path)
+    repo = ArchiveRepository(db)
+    account_id, manifest, sample_work = await _prepare_sample_work(
+        repo,
+        ranges=((0, 1),),
+    )
+    await repo.async_commit_sample_work(
+        sample_work,
+        [_row(0, t1=20.0), _row(1, t1=21.0)],
+    )
+
+    manifest_work = await repo.async_claim_work(
+        account_id=account_id,
+        now_us=utc_now_us() + MANIFEST_RECHECK_US + 1,
+    )
+    assert manifest_work is not None
+    assert manifest_work.kind == "manifest"
+    await repo.async_complete_manifest(
+        manifest_work,
+        SessionMeta(
+            "2026-01-01T00:00:00Z",
+            ((0, 1),),
+            {
+                "started_at": "2026-01-01T00:00:00Z",
+                "sequence_number_ranges": [[0, 1]],
+            },
+        ),
+    )
+
+    audit = await repo.async_claim_work(
+        account_id=account_id,
+        now_us=utc_now_us() + 1,
+    )
+    assert audit is not None
+    assert audit.kind == "audit"
+
+    result = await repo.async_commit_sample_work(audit, [])
+    assert result["committed_rows"] == 0
+    assert result["missing_rows"] == 2
+
+    evidence = await db.async_read(
+        lambda conn: (
+            conn.execute(
+                """
+                SELECT state,attempts,last_error
+                FROM sync_work
+                WHERE work_id=?
+                """,
+                (audit.work_id,),
+            ).fetchone(),
+            conn.execute(
+                """
+                SELECT last_full_audit_us
+                FROM cloud_sessions
+                WHERE session_id=?
+                """,
+                (audit.session_id,),
+            ).fetchone()[0],
+            conn.execute(
+                "SELECT COUNT(*) FROM cloud_samples"
+            ).fetchone()[0],
+            conn.execute(
+                """
+                SELECT COUNT(*) FROM gaps
+                WHERE retry_state!='resolved'
+                """
+            ).fetchone()[0],
+            conn.execute(
+                """
+                SELECT missing_rows
+                FROM sync_receipts
+                WHERE work_id=?
+                ORDER BY committed_at_us DESC
+                LIMIT 1
+                """,
+                (audit.work_id,),
+            ).fetchone()[0],
+        )
+    )
+    assert evidence == (("ready", 1, "audit_incomplete"), None, 2, 0, 2)
+    assert manifest.manifest_id == audit.manifest_id
+    await db.async_stop()
+
+
+@pytest.mark.asyncio
 async def test_changed_same_key_payload_is_versioned_not_overwritten(
     tmp_path: Path,
 ):
