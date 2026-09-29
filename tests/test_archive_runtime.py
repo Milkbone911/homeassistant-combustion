@@ -17,7 +17,6 @@ from custom_components.combustion.const import (
     DOMAIN,
 )
 from custom_components.combustion.runtime import CombustionRuntime
-from custom_components.combustion.source_link import ProjectionSource
 from custom_components.combustion.statistics_projection import (
     StatisticsProjectionHealth,
     async_project_missing_statistics,
@@ -304,56 +303,17 @@ async def test_history_sync_path_owns_cloud_client_instead_of_one_shot_check(
 
 
 @pytest.mark.asyncio
-async def test_s5_projection_skips_existing_recorder_hours(
+async def test_s5_projection_callable_fails_closed(
     hass: HomeAssistant,
 ):
-    """Cloud backfill fills holes without overwriting Recorder-owned hours."""
-    registry = er.async_get(hass)
-    entity = registry.async_get_or_create(
-        "sensor",
-        DOMAIN,
-        "10014e68--sensor--core",
-    )
-
+    """Internal callers cannot bypass the disabled Recorder projection gate."""
     repository = AsyncMock()
-    repository.async_projection_sources.return_value = (
-        ProjectionSource(
-            source_device_id="cloud-source",
-            local_source_id="local-source",
-            canonical_serial="10014E68",
-            local_raw_serial="10014e68",
-        ),
-    )
-    hour_one = int(datetime(2026, 1, 1, 1, tzinfo=UTC).timestamp() * 1_000_000)
-    hour_two = int(datetime(2026, 1, 1, 2, tzinfo=UTC).timestamp() * 1_000_000)
-    repository.async_hourly_temperature_statistics.return_value = (
-        {"start_us": hour_one, "min": 10.0, "max": 20.0, "mean": 15.0},
-        {"start_us": hour_two, "min": 20.0, "max": 30.0, "mean": 25.0},
-    )
     health = StatisticsProjectionHealth()
 
-    with (
-        patch(
-            "custom_components.combustion.statistics_projection._existing_hour_starts",
-            AsyncMock(return_value={hour_one}),
-        ),
-        patch(
-            "custom_components.combustion.statistics_projection.async_import_statistics"
-        ) as import_statistics,
-    ):
+    with pytest.raises(RuntimeError, match="disabled pending S5 hardening"):
         await async_project_missing_statistics(hass, repository, health)
 
-    import_statistics.assert_called_once()
-    called_hass, metadata, rows = import_statistics.call_args.args
-    assert called_hass is hass
-    assert metadata["statistic_id"] == entity.entity_id
-    assert metadata["source"] == "recorder"
-    assert metadata["has_sum"] is False
-    assert len(rows) == 1
-    assert rows[0]["start"] == datetime(2026, 1, 1, 2, tzinfo=UTC)
-    assert rows[0]["min"] == 20.0
-    assert rows[0]["max"] == 30.0
-    assert rows[0]["mean"] == 25.0
-    assert health.queued_hours == 1
-    assert health.skipped_existing_hours == 1
-    assert health.status == "ready"
+    assert health.status == "disabled"
+    assert health.queued_hours == 0
+    assert health.skipped_existing_hours == 0
+    assert health.last_error_category == "hardening_required"
