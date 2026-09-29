@@ -764,6 +764,10 @@ def test_sqlite_wal_fix_qualification_is_conservative(
         ("0", None),
         ("not-hex", None),
         ("100000000", None),
+        ("1_2", None),
+        ("0x12", None),
+        ("+12", None),
+        ("１２", None),
     ],
 )
 def test_s5_probe_serial_normalization(value: str, expected: str | None):
@@ -832,6 +836,7 @@ async def test_s5_exact_serial_link_is_durable_and_idempotent(tmp_path: Path):
     assert row[1] == "exact_serial"
     assert '"cloud_raw_serial":"0A1B2C3D"' in row[2]
     assert '"local_raw_serial":"a1b2c3d"' in row[2]
+    assert '"serial_parser_policy":1' in row[2]
     assert row[3:] == (None, None)
     assert (await links.async_counts())["active_links"] == 1
     await db.async_stop()
