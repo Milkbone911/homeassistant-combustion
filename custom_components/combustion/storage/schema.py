@@ -9,8 +9,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-SCHEMA_VERSION = 3
-MINIMUM_READER_VERSION = 3
+SCHEMA_VERSION = 4
+MINIMUM_READER_VERSION = 4
 SCHEMA_V1_MINIMUM_READER_VERSION = 1
 MAX_RAW_JSON_BYTES = 256 * 1024
 
@@ -401,10 +401,79 @@ ON identity_links(canonical_serial, created_at_us DESC);
 """
 
 SCHEMA_V3_CHECKSUM = hashlib.sha256(SCHEMA_V3_SQL.encode()).hexdigest()
+
+SCHEMA_V4_SQL = """
+CREATE TABLE projection_jobs (
+    projection_job_id TEXT PRIMARY KEY,
+    target_kind TEXT NOT NULL
+        CHECK (target_kind IN ('external_statistics')),
+    requested_start_us INTEGER NOT NULL,
+    requested_end_us INTEGER NOT NULL,
+    algorithm_version INTEGER NOT NULL CHECK (algorithm_version >= 1),
+    state TEXT NOT NULL
+        CHECK (state IN (
+            'planned','running','confirmed','partial','failed','cancelled'
+        )),
+    max_rows INTEGER NOT NULL CHECK (max_rows > 0),
+    planned_rows INTEGER NOT NULL DEFAULT 0 CHECK (planned_rows >= 0),
+    queued_rows INTEGER NOT NULL DEFAULT 0 CHECK (queued_rows >= 0),
+    confirmed_rows INTEGER NOT NULL DEFAULT 0 CHECK (confirmed_rows >= 0),
+    failed_rows INTEGER NOT NULL DEFAULT 0 CHECK (failed_rows >= 0),
+    created_at_us INTEGER NOT NULL,
+    updated_at_us INTEGER NOT NULL,
+    error_category TEXT,
+    CHECK (requested_end_us > requested_start_us)
+);
+CREATE UNIQUE INDEX idx_projection_jobs_one_active
+ON projection_jobs(target_kind)
+WHERE state IN ('planned','running');
+CREATE INDEX idx_projection_jobs_created
+ON projection_jobs(created_at_us DESC);
+
+CREATE TABLE projection_rows (
+    projection_row_id TEXT PRIMARY KEY,
+    projection_job_id TEXT NOT NULL
+        REFERENCES projection_jobs(projection_job_id) ON DELETE RESTRICT,
+    identity_link_id TEXT NOT NULL
+        REFERENCES identity_links(identity_link_id) ON DELETE RESTRICT,
+    source_device_id TEXT NOT NULL
+        REFERENCES source_devices(source_device_id) ON DELETE RESTRICT,
+    statistic_id TEXT NOT NULL,
+    field_name TEXT NOT NULL,
+    hour_start_us INTEGER NOT NULL,
+    source_revision_hash TEXT NOT NULL,
+    source_evidence_json TEXT NOT NULL,
+    algorithm_version INTEGER NOT NULL CHECK (algorithm_version >= 1),
+    unit_of_measurement TEXT NOT NULL,
+    min_value REAL NOT NULL,
+    max_value REAL NOT NULL,
+    mean_value REAL NOT NULL,
+    known_duration_us INTEGER NOT NULL CHECK (known_duration_us > 0),
+    sample_count INTEGER NOT NULL CHECK (sample_count > 0),
+    state TEXT NOT NULL
+        CHECK (state IN (
+            'planned','queued','confirmed','failed','superseded'
+        )),
+    result_digest TEXT,
+    last_error TEXT,
+    created_at_us INTEGER NOT NULL,
+    updated_at_us INTEGER NOT NULL,
+    UNIQUE(
+        statistic_id,hour_start_us,source_revision_hash,algorithm_version
+    )
+);
+CREATE INDEX idx_projection_rows_job_state
+ON projection_rows(projection_job_id,state,hour_start_us);
+CREATE INDEX idx_projection_rows_target_hour
+ON projection_rows(statistic_id,hour_start_us,created_at_us DESC);
+"""
+
+SCHEMA_V4_CHECKSUM = hashlib.sha256(SCHEMA_V4_SQL.encode()).hexdigest()
 _MIGRATION_CHECKSUMS = {
     1: SCHEMA_V1_CHECKSUM,
     2: SCHEMA_V2_CHECKSUM,
     3: SCHEMA_V3_CHECKSUM,
+    4: SCHEMA_V4_CHECKSUM,
 }
 
 
@@ -569,6 +638,18 @@ def migrate_schema(
             minimum_reader_version=3,
             sql=SCHEMA_V3_SQL,
             checksum=SCHEMA_V3_CHECKSUM,
+            application_fingerprint=application_fingerprint,
+        )
+        metadata = read_metadata_compatible(conn)
+
+    if metadata.schema_version == 3:
+        _apply_migration(
+            conn,
+            from_version=3,
+            to_version=4,
+            minimum_reader_version=4,
+            sql=SCHEMA_V4_SQL,
+            checksum=SCHEMA_V4_CHECKSUM,
             application_fingerprint=application_fingerprint,
         )
         metadata = read_metadata_compatible(conn)
