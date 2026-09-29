@@ -112,6 +112,10 @@ class CloudSyncSupervisor:
         client, generation, subject = create_linked_cloud_client(
             self.hass, self.entry
         )
+        # Capture the authority snapshot before the first awaited provider I/O
+        # so a replacement that wins during probes() can fence error side effects.
+        self._generation = generation
+        self._subject = subject
         probes = await client.probes()
         if not linked_account_matches(self.entry, generation, subject):
             raise CloudLinkChangedError(
@@ -292,7 +296,12 @@ class CloudSyncSupervisor:
             raise
 
     def _publish_failure(self, err: BaseException) -> None:
-        if isinstance(err, CloudLinkChangedError):
+        stale_generation = (
+            self._generation is not None
+            and self._subject is not None
+            and not self._link_matches()
+        )
+        if isinstance(err, CloudLinkChangedError) or stale_generation:
             self.health.status = SyncStatus.STOPPED
             self.health.last_error_category = "link_changed"
             return
