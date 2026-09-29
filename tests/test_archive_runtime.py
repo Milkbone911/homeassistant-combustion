@@ -208,6 +208,60 @@ async def test_runtime_stops_archive_intake_before_cancelling_sync():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("cloud_sync_enabled", "expected_checks"),
+    [(False, 1), (True, 1)],
+)
+async def test_archive_failure_keeps_exactly_one_cloud_check_owner(
+    hass: HomeAssistant,
+    cloud_sync_enabled: bool,
+    expected_checks: int,
+):
+    """Archive failure cannot duplicate the configured cloud-health owner."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id="combustion_meatnet",
+        version=1,
+        data={
+            "cloud_api_key": "api",
+            "cloud_refresh_token": "refresh",
+            "cloud_subject": "subject",
+            "cloud_link_generation": 1,
+        },
+        options={
+            CONF_HISTORY_ENABLED: True,
+            CONF_CLOUD_SYNC_ENABLED: cloud_sync_enabled,
+        },
+        title="Meatnet",
+    )
+    entry.add_to_hass(hass)
+
+    one_shot = AsyncMock()
+    with (
+        patch(
+            "custom_components.combustion.ArchiveDatabase.async_start",
+            AsyncMock(
+                side_effect=ArchiveRuntimeUnsupported(
+                    "synthetic unsupported SQLite"
+                )
+            ),
+        ),
+        patch(
+            "custom_components.combustion.async_check_linked_account",
+            one_shot,
+        ),
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done(wait_background_tasks=True)
+
+    assert one_shot.await_count == expected_checks
+    assert entry.runtime_data.archive_health.status is ArchiveStatus.UNSUPPORTED
+
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+
+
+@pytest.mark.asyncio
 async def test_history_sync_path_owns_cloud_client_instead_of_one_shot_check(
     hass: HomeAssistant,
 ):
