@@ -10,6 +10,8 @@ import pytest
 from custom_components.combustion.cloud.client import IndexTraversal
 from custom_components.combustion.cloud.ha import CloudLinkChangedError, CloudLinkHealth
 from custom_components.combustion.cloud.models import (
+    CloudAuthError,
+    CloudPermissionError,
     CloudSchemaError,
     CloudTransportError,
     IndexPage,
@@ -22,6 +24,7 @@ from custom_components.combustion.reconciliation import sync as sync_module
 from custom_components.combustion.reconciliation.sync import (
     CloudSyncSupervisor,
     SyncHealth,
+    SyncStatus,
 )
 from custom_components.combustion.storage.database import ArchiveDatabase
 from custom_components.combustion.storage.repository import ArchiveRepository
