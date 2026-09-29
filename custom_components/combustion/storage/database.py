@@ -942,13 +942,11 @@ class ArchiveDatabase:
             self._commands.put(_STOP)
             remaining = max(0.0, deadline - loop.time())
             if remaining > 0:
-                try:
+                with suppress(TimeoutError):
                     await asyncio.wait_for(
                         asyncio.to_thread(thread.join, remaining),
                         timeout=remaining,
                     )
-                except TimeoutError:
-                    pass
             if thread.is_alive():
                 self.health.status = ArchiveStatus.DEGRADED
                 self.health.error_category = "shutdown_incomplete"
