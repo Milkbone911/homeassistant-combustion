@@ -108,26 +108,55 @@ class CloudSyncSupervisor:
         self.health.failed_work = int(counts["failed"])
 
     async def _refresh_context(self) -> None:
-        """Authenticate once, retain one client and discover current probes."""
+        """Establish current account ownership, then run optional discovery."""
         client, generation, subject = create_linked_cloud_client(
             self.hass, self.entry
         )
         # Capture the authority snapshot before the first awaited provider I/O
-        # so a replacement that wins during probes() can fence error side effects.
+        # so a replacement that wins during discovery can fence side effects.
         self._generation = generation
         self._subject = subject
-        probes = await client.probes()
         if not linked_account_matches(self.entry, generation, subject):
             raise CloudLinkChangedError(
-                "Cloud link changed during association discovery"
+                "Cloud link changed during account context establishment"
             )
+
+        # Persisted work already carries its source serial/locator. Establish
+        # client/account ownership before fresh provider discovery so ordinary
+        # association-list transport/schema failure cannot gate durable work.
+        account_id, _ = await self.repository.async_register_account(
+            subject, generation, ()
+        )
+        self._client = client
+        self._account_id = account_id
+
+        now = utc_now_us()
+        self._discovery_error_category = None
+        try:
+            probes = await client.probes()
+            self._require_link()
+        except asyncio.CancelledError:
+            raise
+        except CloudLinkChangedError:
+            raise
+        except (CloudAuthError, CloudPermissionError):
+            raise
+        except CloudTransportError:
+            self._discovery_error_category = "discovery_transport"
+            self.cloud_health.status = CloudLinkStatus.DEGRADED
+            self.cloud_health.error_category = "transport"
+            self._next_context_refresh_us = now + CONTEXT_REFRESH_US
+            return
+        except (CloudSchemaError, CloudBoundsError, CloudConflictError):
+            self._discovery_error_category = "discovery_schema"
+            self.cloud_health.status = CloudLinkStatus.COMPATIBILITY_ERROR
+            self.cloud_health.error_category = "schema"
+            self._next_context_refresh_us = now + CONTEXT_REFRESH_US
+            return
 
         account_id, sources = await self.repository.async_register_account(
             subject, generation, probes
         )
-        self._client = client
-        self._generation = generation
-        self._subject = subject
         self._account_id = account_id
 
         self.cloud_health.status = CloudLinkStatus.READY
@@ -135,8 +164,6 @@ class CloudSyncSupervisor:
         self.cloud_health.error_category = None
         self.cloud_health.verified_generation = generation
 
-        now = utc_now_us()
-        self._discovery_error_category = None
         for probe in probes:
             source = sources[probe.serial]
             if not await self.repository.async_discovery_due(
