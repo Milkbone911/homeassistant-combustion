@@ -38,7 +38,9 @@ from .const import (
     LOGGER,
 )
 from .local_capture import LocalCaptureStatus, LocalCaptureSupervisor
+from .projection_repository import ProjectionRepository
 from .reconciliation.sync import CloudSyncSupervisor, SyncStatus
+from .statistics_projection import StatisticsProjectionStatus
 from .runtime import CombustionRuntime
 from .storage.database import (
     ArchiveBusyError,
@@ -155,6 +157,16 @@ async def _async_start_archive(
         repository = ArchiveRepository(database)
         runtime.archive_repository = repository
         await repository.async_recover_interrupted_work()
+        projection_repository = ProjectionRepository(database)
+        runtime.projection_repository = projection_repository
+        recovered_projection_jobs = (
+            await projection_repository.async_recover_incomplete_jobs()
+        )
+        if recovered_projection_jobs:
+            runtime.statistics_projection_health.status = (
+                StatisticsProjectionStatus.PARTIAL
+            )
+            runtime.statistics_projection_health.last_error_category = "interrupted"
         # Reconcile stale local-capture generations whenever the archive opens,
         # even if local capture is currently disabled. A prior unclean unload
         # must remain visible as interrupted evidence instead of lingering as
