@@ -15,6 +15,7 @@ from custom_components.combustion.cloud.models import (
 from custom_components.combustion.storage.database import ArchiveDatabase
 from custom_components.combustion.storage.repository import (
     MANIFEST_RECHECK_US,
+    MISSING_RETRY_US,
     ArchiveRepository,
     LocalCaptureGapRecord,
     LocalObservationRecord,
@@ -363,6 +364,71 @@ async def test_partial_response_creates_gap_and_later_fill_resolves_it(
     counts = await repo.async_archive_counts()
     assert counts["samples"] == 3
     assert counts["open_gaps"] == 0
+    await db.async_stop()
+
+
+@pytest.mark.asyncio
+async def test_permanent_early_hole_does_not_starve_forward_acquisition(
+    tmp_path: Path,
+):
+    """A retryable early hole cannot monopolize later manifest ranges."""
+    db = await _database(tmp_path)
+    repo = ArchiveRepository(db)
+    account_id, _, first = await _prepare_sample_work(
+        repo,
+        ranges=((0, 1999),),
+    )
+    assert (first.start_seq, first.end_seq, first.attempts) == (0, 999, 1)
+
+    def row(sequence: int) -> SampleRow:
+        raw = {"sequence_number": sequence, "t1": float(sequence)}
+        return SampleRow(
+            sequence=sequence,
+            sampled_at=None,
+            fields={"t1": float(sequence)},
+            invalid_fields=(),
+            raw=raw,
+        )
+
+    result = await repo.async_commit_sample_work(
+        first,
+        [row(sequence) for sequence in range(1, 1000)],
+    )
+    assert result["missing_rows"] == 1
+
+    forward = await repo.async_claim_work(
+        account_id=account_id,
+        now_us=utc_now_us() + 1,
+    )
+    assert forward is not None
+    assert forward.work_id != first.work_id
+    assert (forward.start_seq, forward.end_seq) == (1000, 1999)
+    await repo.async_commit_sample_work(
+        forward,
+        [row(sequence) for sequence in range(1000, 2000)],
+    )
+
+    repair = await repo.async_claim_work(
+        account_id=account_id,
+        now_us=utc_now_us() + MISSING_RETRY_US + 1,
+    )
+    assert repair is not None
+    assert repair.work_id == first.work_id
+    assert (repair.start_seq, repair.end_seq, repair.attempts) == (0, 0, 2)
+    await repo.async_commit_sample_work(repair, [])
+
+    second_repair = await repo.async_claim_work(
+        account_id=account_id,
+        now_us=utc_now_us() + MISSING_RETRY_US + 1,
+    )
+    assert second_repair is not None
+    assert second_repair.work_id == first.work_id
+    assert second_repair.attempts == 3
+    assert (second_repair.start_seq, second_repair.end_seq) == (0, 0)
+
+    counts = await repo.async_archive_counts()
+    assert counts["samples"] == 1999
+    assert counts["open_gaps"] == 1
     await db.async_stop()
 
 
