@@ -12,7 +12,13 @@ from custom_components.combustion.cloud.ha import (
     CloudLinkStatus,
     async_check_linked_account,
 )
-from custom_components.combustion.cloud.models import CloudAuthError, Probe
+from custom_components.combustion.cloud.models import (
+    CloudAuthError,
+    CloudPermissionError,
+    CloudSchemaError,
+    CloudTransportError,
+    Probe,
+)
 from custom_components.combustion.const import (
     CONF_CLOUD_API_KEY,
     CONF_CLOUD_LINK_GENERATION,
@@ -144,6 +150,58 @@ async def test_auth_failure_requests_reauth_without_unloading_local_runtime(
     assert hass.data[DOMAIN] is runtime.probe_manager
     assert runtime.cloud_health.status is CloudLinkStatus.REAUTH_REQUIRED
     assert runtime.cloud_health.error_category == "auth"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure",
+    [
+        CloudAuthError("stale auth"),
+        CloudPermissionError("stale permission"),
+        CloudTransportError("stale transport"),
+        CloudSchemaError("stale schema"),
+    ],
+)
+async def test_stale_generation_errors_cannot_publish_into_replacement_account(
+    hass: HomeAssistant,
+    failure: Exception,
+):
+    """Every post-I/O error path is fenced by the captured account generation."""
+    entry = _entry()
+    entry.add_to_hass(hass)
+    health = CloudLinkHealth()
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def probes(self):
+            hass.config_entries.async_update_entry(
+                entry,
+                data={
+                    **entry.data,
+                    CONF_CLOUD_SUBJECT: "replacement-subject",
+                    CONF_CLOUD_REFRESH_TOKEN: "replacement-refresh",
+                    CONF_CLOUD_LINK_GENERATION: 5,
+                },
+            )
+            raise failure
+
+    with (
+        patch(
+            "custom_components.combustion.cloud.ha.CombustionCloudClient",
+            FakeClient,
+        ),
+        patch.object(entry, "async_start_reauth") as start_reauth,
+    ):
+        await async_check_linked_account(hass, entry, health)
+
+    start_reauth.assert_not_called()
+    assert entry.data[CONF_CLOUD_SUBJECT] == "replacement-subject"
+    assert entry.data[CONF_CLOUD_REFRESH_TOKEN] == "replacement-refresh"
+    assert entry.data[CONF_CLOUD_LINK_GENERATION] == 5
+    assert health.status is CloudLinkStatus.CHECKING
+    assert health.error_category is None
 
 
 @pytest.mark.asyncio

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from homeassistant.core import HomeAssistant
@@ -44,6 +44,8 @@ async def test_archive_status_websocket_is_sanitized(
     result = response["result"]
     assert result["archive"]["status"] == "disabled"
     assert result["sync"]["status"] == "disabled"
+    assert result["source_links"]["status"] == "disabled"
+    assert result["statistics_projection"]["status"] == "disabled"
 
     rendered = repr(result)
     assert "cloud_subject" not in rendered
@@ -186,3 +188,60 @@ async def test_archive_sync_now_serializes_through_supervisor(
         force_context_refresh=True,
         max_work=4,
     )
+
+
+@pytest.mark.asyncio
+async def test_s5_source_links_websocket_reconciles_and_refreshes_health(
+    hass: HomeAssistant,
+    hass_ws_client,
+):
+    """Admin reconcile exposes aggregate counts without raw source identifiers."""
+    entry = await _loaded_entry(hass)
+    runtime = entry.runtime_data
+    runtime.archive_health.status = ArchiveStatus.READY
+    runtime.archive_database = AsyncMock()
+
+    repository = AsyncMock()
+    repository.async_counts.return_value = {
+        "cloud_probe_sources": 2,
+        "local_probe_sources": 1,
+        "active_links": 1,
+        "total_links": 1,
+        "unresolved_cloud_sources": 1,
+        "ambiguous_cloud_sources": 0,
+    }
+
+    with patch(
+        "custom_components.combustion.websocket_api.SourceLinkRepository",
+        return_value=repository,
+    ):
+        client = await hass_ws_client(hass)
+        await client.send_json_auto_id(
+            {"type": "combustion/archive/source_links"}
+        )
+        response = await client.receive_json()
+
+    assert response["success"] is True
+    assert response["result"]["active_links"] == 1
+    assert response["result"]["unresolved_cloud_sources"] == 1
+    assert runtime.source_link_health.status == "ready"
+    assert runtime.source_link_health.active_links == 1
+    repository.async_reconcile.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_s5_projection_websocket_fails_closed_during_hardening(
+    hass: HomeAssistant,
+    hass_ws_client,
+):
+    """No Recorder mutation API is available before the projection gate passes."""
+    await _loaded_entry(hass)
+    client = await hass_ws_client(hass)
+    await client.send_json_auto_id(
+        {"type": "combustion/archive/project_statistics"}
+    )
+    response = await client.receive_json()
+
+    assert response["success"] is False
+    assert response["error"]["code"] == "not_supported"
+    assert "disabled pending S5 hardening" in response["error"]["message"]

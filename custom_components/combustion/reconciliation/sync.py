@@ -85,6 +85,7 @@ class CloudSyncSupervisor:
         self._subject: str | None = None
         self._account_id: str | None = None
         self._next_context_refresh_us = 0
+        self._discovery_error_category: str | None = None
         self._cycle_lock = asyncio.Lock()
 
     def _link_matches(self) -> bool:
@@ -107,22 +108,55 @@ class CloudSyncSupervisor:
         self.health.failed_work = int(counts["failed"])
 
     async def _refresh_context(self) -> None:
-        """Authenticate once, retain one client and discover current probes."""
+        """Establish current account ownership, then run optional discovery."""
         client, generation, subject = create_linked_cloud_client(
             self.hass, self.entry
         )
-        probes = await client.probes()
+        # Capture the authority snapshot before the first awaited provider I/O
+        # so a replacement that wins during discovery can fence side effects.
+        self._generation = generation
+        self._subject = subject
         if not linked_account_matches(self.entry, generation, subject):
             raise CloudLinkChangedError(
-                "Cloud link changed during association discovery"
+                "Cloud link changed during account context establishment"
             )
+
+        # Persisted work already carries its source serial/locator. Establish
+        # client/account ownership before fresh provider discovery so ordinary
+        # association-list transport/schema failure cannot gate durable work.
+        account_id, _ = await self.repository.async_register_account(
+            subject, generation, ()
+        )
+        self._client = client
+        self._account_id = account_id
+
+        now = utc_now_us()
+        self._discovery_error_category = None
+        try:
+            probes = await client.probes()
+            self._require_link()
+        except asyncio.CancelledError:
+            raise
+        except CloudLinkChangedError:
+            raise
+        except (CloudAuthError, CloudPermissionError):
+            raise
+        except CloudTransportError:
+            self._discovery_error_category = "discovery_transport"
+            self.cloud_health.status = CloudLinkStatus.DEGRADED
+            self.cloud_health.error_category = "transport"
+            self._next_context_refresh_us = now + CONTEXT_REFRESH_US
+            return
+        except (CloudSchemaError, CloudBoundsError, CloudConflictError):
+            self._discovery_error_category = "discovery_schema"
+            self.cloud_health.status = CloudLinkStatus.COMPATIBILITY_ERROR
+            self.cloud_health.error_category = "schema"
+            self._next_context_refresh_us = now + CONTEXT_REFRESH_US
+            return
 
         account_id, sources = await self.repository.async_register_account(
             subject, generation, probes
         )
-        self._client = client
-        self._generation = generation
-        self._subject = subject
         self._account_id = account_id
 
         self.cloud_health.status = CloudLinkStatus.READY
@@ -130,7 +164,6 @@ class CloudSyncSupervisor:
         self.cloud_health.error_category = None
         self.cloud_health.verified_generation = generation
 
-        now = utc_now_us()
         for probe in probes:
             source = sources[probe.serial]
             if not await self.repository.async_discovery_due(
@@ -174,11 +207,55 @@ class CloudSyncSupervisor:
                     terminal_reason=traversal.terminal_reason,
                     snapshot_consistent=traversal.snapshot_consistent,
                 )
-            except BaseException:
+            except asyncio.CancelledError:
                 await self.repository.async_finish_discovery(
                     run_id,
                     complete=False,
-                    terminal_reason="interrupted",
+                    terminal_reason="cancelled",
+                )
+                raise
+            except CloudLinkChangedError:
+                await self.repository.async_finish_discovery(
+                    run_id,
+                    complete=False,
+                    terminal_reason="link_changed",
+                )
+                raise
+            except CloudAuthError:
+                await self.repository.async_finish_discovery(
+                    run_id,
+                    complete=False,
+                    terminal_reason="auth",
+                )
+                raise
+            except CloudPermissionError:
+                await self.repository.async_finish_discovery(
+                    run_id,
+                    complete=False,
+                    terminal_reason="permission",
+                )
+                raise
+            except CloudTransportError:
+                await self.repository.async_finish_discovery(
+                    run_id,
+                    complete=False,
+                    terminal_reason="transport",
+                )
+                self._discovery_error_category = "discovery_transport"
+                continue
+            except (CloudSchemaError, CloudBoundsError, CloudConflictError):
+                await self.repository.async_finish_discovery(
+                    run_id,
+                    complete=False,
+                    terminal_reason="schema",
+                )
+                self._discovery_error_category = "discovery_schema"
+                continue
+            except Exception:
+                await self.repository.async_finish_discovery(
+                    run_id,
+                    complete=False,
+                    terminal_reason="internal",
                 )
                 raise
 
@@ -189,9 +266,9 @@ class CloudSyncSupervisor:
         if self._client is None:
             raise CloudTransportError("Cloud sync client is unavailable")
         self._require_link()
-        session_id = numeric_session_token(work.source_session_token)
 
         try:
+            session_id = numeric_session_token(work.source_session_token)
             if work.kind == "manifest":
                 meta = await self._client.session_meta(work.serial, session_id)
                 self._require_link()
@@ -246,7 +323,12 @@ class CloudSyncSupervisor:
             raise
 
     def _publish_failure(self, err: BaseException) -> None:
-        if isinstance(err, CloudLinkChangedError):
+        stale_generation = (
+            self._generation is not None
+            and self._subject is not None
+            and not self._link_matches()
+        )
+        if isinstance(err, CloudLinkChangedError) or stale_generation:
             self.health.status = SyncStatus.STOPPED
             self.health.last_error_category = "link_changed"
             return
@@ -319,7 +401,7 @@ class CloudSyncSupervisor:
 
             await self._refresh_queue_health()
             self.health.status = SyncStatus.IDLE
-            self.health.last_error_category = None
+            self.health.last_error_category = self._discovery_error_category
             self.health.last_success_us = utc_now_us()
             return processed
 

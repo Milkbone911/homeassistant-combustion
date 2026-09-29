@@ -211,19 +211,27 @@ async def async_check_linked_account(
         # reauth or publish health into the new account's runtime.
         return
     except CloudAuthError:
+        if not linked_account_matches(entry, generation, expected_subject):
+            return
         health.status = CloudLinkStatus.REAUTH_REQUIRED
         health.error_category = "auth"
         entry.async_start_reauth(hass)
         return
     except CloudPermissionError:
+        if not linked_account_matches(entry, generation, expected_subject):
+            return
         health.status = CloudLinkStatus.DEGRADED
         health.error_category = "permission"
         return
     except CloudTransportError:
+        if not linked_account_matches(entry, generation, expected_subject):
+            return
         health.status = CloudLinkStatus.DEGRADED
         health.error_category = "transport"
         return
     except (CloudSchemaError, CloudBoundsError, CloudConflictError):
+        if not linked_account_matches(entry, generation, expected_subject):
+            return
         health.status = CloudLinkStatus.COMPATIBILITY_ERROR
         health.error_category = "schema"
         return

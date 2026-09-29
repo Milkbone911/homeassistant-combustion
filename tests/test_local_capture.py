@@ -216,6 +216,77 @@ async def test_regular_policy_keeps_latest_pending_point_on_clean_stop(
 
 
 @pytest.mark.asyncio
+async def test_regular_cadence_uses_emission_clock_not_receipt_clock(
+    hass: HomeAssistant,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Sustained input cannot emit regular rows faster than the declared interval."""
+    database, _repository, probes, _predictions, _health, supervisor = await _capture(
+        hass, tmp_path
+    )
+
+    clock = [0.0]
+    emissions: list[float] = []
+    original_enqueue = supervisor._enqueue
+    monkeypatch.setattr(supervisor, "_emission_clock", lambda: clock[0])
+
+    def track_enqueue(record):
+        if record.capture_class == "regular":
+            emissions.append(clock[0])
+        original_enqueue(record)
+
+    monkeypatch.setattr(supervisor, "_enqueue", track_enqueue)
+
+    probes.emit(_probe_observation(20.0, monotonic=100.00, epoch=1_000.00))
+    probes.emit(_probe_observation(21.0, monotonic=100.25, epoch=1_000.25))
+
+    for offset, temperature in ((0.25, 22.0), (0.50, 23.0), (0.75, 24.0)):
+        clock[0] = offset
+        probes.emit(
+            _probe_observation(
+                temperature,
+                monotonic=100.25 + offset,
+                epoch=1_000.25 + offset,
+            )
+        )
+
+    assert len(supervisor._pending_regular) == 1
+    stream_key = next(iter(supervisor._pending_regular))
+    clock[0] = 1.0
+    supervisor._flush_regular(stream_key)
+
+    for offset, temperature in ((1.00, 25.0), (1.25, 26.0), (1.50, 27.0), (1.75, 28.0)):
+        clock[0] = offset
+        probes.emit(
+            _probe_observation(
+                temperature,
+                monotonic=100.25 + offset,
+                epoch=1_000.25 + offset,
+            )
+        )
+
+    clock[0] = 2.0
+    supervisor._flush_regular(stream_key)
+
+    assert emissions == [0.0, 1.0, 2.0]
+
+    await supervisor.async_stop()
+    run = await database.async_read(
+        lambda conn: conn.execute(
+            """
+            SELECT policy_version,regular_interval_ms
+            FROM local_capture_runs
+            ORDER BY started_at_us DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    )
+    assert run == (3, 1000)
+    await database.async_stop()
+
+
+@pytest.mark.asyncio
 async def test_normal_and_instant_streams_are_bucketed_independently(
     hass: HomeAssistant,
     tmp_path: Path,
@@ -545,23 +616,29 @@ async def test_queue_overflow_prefers_dropping_regular_and_persists_loss(
     )
 
     # The transition is removed from the queue by the writer and held in its
-    # blocked first transaction. Later regular observations then exercise only
-    # the bounded queue's explicit regular-drop policy.
+    # blocked first transaction. Advance the policy's emission clock between
+    # regular points so this test exercises queue overflow rather than the
+    # independent one-second coalescing policy.
+    clock = [0.0]
+    monkeypatch.setattr(supervisor, "_emission_clock", lambda: clock[0])
     probes.emit(_probe_observation(20.0, monotonic=400.0, epoch=4_000.0))
     await asyncio.wait_for(writer_entered.wait(), 1)
 
-    for offset, value in enumerate((21.0, 22.0, 23.0, 24.0), start=2):
-        probes.emit(
-            _probe_observation(
-                value,
-                monotonic=400.0 + offset,
-                epoch=4_000.0 + offset,
+    try:
+        for offset, value in enumerate((21.0, 22.0, 23.0, 24.0), start=1):
+            clock[0] = float(offset)
+            probes.emit(
+                _probe_observation(
+                    value,
+                    monotonic=400.0 + offset,
+                    epoch=4_000.0 + offset,
+                )
             )
-        )
 
-    assert health.dropped_observations == 2
-    release_writer.set()
-    await supervisor.async_stop()
+        assert health.dropped_observations == 2
+    finally:
+        release_writer.set()
+        await supervisor.async_stop()
 
     gap = await database.async_read(
         lambda conn: conn.execute(

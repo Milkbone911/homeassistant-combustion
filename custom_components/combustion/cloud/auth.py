@@ -120,6 +120,9 @@ class TokenManager:
             if self._on_rotation is not None and new_refresh != old_refresh:
                 try:
                     await self._on_rotation(old_refresh, new_refresh)
+                except CloudAuthError:
+                    # Preserve adapter-owned link-generation classification.
+                    raise
                 except Exception:
                     # A future adapter must surface its actual persistence
                     # result separately. Never include secret callback errors.

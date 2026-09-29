@@ -17,6 +17,7 @@ from homeassistant.core import HomeAssistant, callback
 
 from .const import DOMAIN
 from .reconciliation.sync import MAX_WORK_PER_CYCLE
+from .source_link import SourceLinkRepository
 from .storage.database import ArchiveStatus
 
 WS_STATUS = "combustion/archive/status"
@@ -24,6 +25,8 @@ WS_SESSIONS = "combustion/archive/sessions"
 WS_SAMPLE_VERSIONS = "combustion/archive/sample_versions"
 WS_SYNC_NOW = "combustion/archive/sync_now"
 WS_BACKUP = "combustion/archive/backup"
+WS_SOURCE_LINKS = "combustion/archive/source_links"
+WS_PROJECT_STATISTICS = "combustion/archive/project_statistics"
 
 
 @callback
@@ -34,6 +37,8 @@ def async_register_websocket_handlers(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, websocket_archive_sample_versions)
     websocket_api.async_register_command(hass, websocket_archive_sync_now)
     websocket_api.async_register_command(hass, websocket_archive_backup)
+    websocket_api.async_register_command(hass, websocket_archive_source_links)
+    websocket_api.async_register_command(hass, websocket_archive_project_statistics)
 
 
 def _runtime(hass: HomeAssistant):
@@ -42,6 +47,36 @@ def _runtime(hass: HomeAssistant):
     if len(entries) != 1:
         return None
     return entries[0].runtime_data
+
+
+async def _reconcile_source_links(runtime) -> tuple[SourceLinkRepository, dict[str, int]]:
+    """Run one S5 reconcile pass and refresh aggregate runtime health."""
+    database = runtime.archive_database
+    if database is None or runtime.archive_health.status is not ArchiveStatus.READY:
+        raise RuntimeError("Archive is not ready")
+    repository = runtime.source_link_repository
+    if repository is None:
+        repository = SourceLinkRepository(database)
+        runtime.source_link_repository = repository
+
+    runtime.source_link_health.status = "starting"
+    try:
+        await repository.async_reconcile()
+        counts = await repository.async_counts()
+    except Exception:
+        runtime.source_link_health.status = "degraded"
+        runtime.source_link_health.last_error_category = "archive"
+        raise
+
+    health = runtime.source_link_health
+    health.status = "ready"
+    health.cloud_probe_sources = counts["cloud_probe_sources"]
+    health.local_probe_sources = counts["local_probe_sources"]
+    health.active_links = counts["active_links"]
+    health.unresolved_cloud_sources = counts["unresolved_cloud_sources"]
+    health.ambiguous_cloud_sources = counts["ambiguous_cloud_sources"]
+    health.last_error_category = None
+    return repository, counts
 
 
 @websocket_api.require_admin
@@ -101,6 +136,34 @@ async def websocket_archive_status(
                 "ready_work": sync.ready_work,
                 "running_work": sync.running_work,
                 "failed_work": sync.failed_work,
+            },
+            "source_links": {
+                "status": runtime.source_link_health.status,
+                "cloud_probe_sources": runtime.source_link_health.cloud_probe_sources,
+                "local_probe_sources": runtime.source_link_health.local_probe_sources,
+                "active_links": runtime.source_link_health.active_links,
+                "unresolved_cloud_sources": (
+                    runtime.source_link_health.unresolved_cloud_sources
+                ),
+                "ambiguous_cloud_sources": (
+                    runtime.source_link_health.ambiguous_cloud_sources
+                ),
+                "last_error_category": runtime.source_link_health.last_error_category,
+            },
+            "statistics_projection": {
+                "status": runtime.statistics_projection_health.status,
+                "linked_sources": runtime.statistics_projection_health.linked_sources,
+                "resolved_entities": (
+                    runtime.statistics_projection_health.resolved_entities
+                ),
+                "queued_hours": runtime.statistics_projection_health.queued_hours,
+                "skipped_existing_hours": (
+                    runtime.statistics_projection_health.skipped_existing_hours
+                ),
+                "last_run_us": runtime.statistics_projection_health.last_run_us,
+                "last_error_category": (
+                    runtime.statistics_projection_health.last_error_category
+                ),
             },
             "counts": counts,
             "queue": queue,
@@ -272,4 +335,43 @@ async def websocket_archive_backup(
             "sha256": result["sha256"],
             "counts": result["counts"],
         },
+    )
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command({vol.Required("type"): WS_SOURCE_LINKS})
+@websocket_api.async_response
+async def websocket_archive_source_links(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Reconcile exact cross-source evidence and return aggregate counts."""
+    runtime = _runtime(hass)
+    if runtime is None:
+        connection.send_error(msg["id"], ERR_NOT_FOUND, "Combustion entry is not loaded")
+        return
+    try:
+        _repository, counts = await _reconcile_source_links(runtime)
+    except Exception:  # noqa: BLE001
+        connection.send_error(
+            msg["id"], ERR_UNKNOWN_ERROR, "Source-link reconciliation failed"
+        )
+        return
+    connection.send_result(msg["id"], counts)
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command({vol.Required("type"): WS_PROJECT_STATISTICS})
+@websocket_api.async_response
+async def websocket_archive_project_statistics(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Refuse Recorder mutation until the S5 projection hardening gate passes."""
+    connection.send_error(
+        msg["id"],
+        ERR_NOT_SUPPORTED,
+        "Statistics projection is disabled pending S5 hardening",
     )

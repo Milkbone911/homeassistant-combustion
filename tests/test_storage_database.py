@@ -11,6 +11,10 @@ from pathlib import Path
 
 import pytest
 
+from custom_components.combustion.source_link import (
+    SourceLinkRepository,
+    canonical_probe_serial,
+)
 from custom_components.combustion.storage.database import (
     ArchiveBusyError,
     ArchiveDatabase,
@@ -20,7 +24,11 @@ from custom_components.combustion.storage.database import (
     ArchiveStatus,
     sqlite_wal_fix_qualified,
 )
-from custom_components.combustion.storage.schema import install_schema_v1
+from custom_components.combustion.storage.schema import (
+    SCHEMA_V2_CHECKSUM,
+    SCHEMA_V2_SQL,
+    install_schema_v1,
+)
 
 
 @pytest.mark.asyncio
@@ -30,8 +38,8 @@ async def test_archive_create_reopen_and_identity_binding(tmp_path: Path):
     db = ArchiveDatabase(path, require_qualified_wal=False)
     metadata = await db.async_start(allow_create=True)
 
-    assert metadata.schema_version == 2
-    assert metadata.database_generation == 2
+    assert metadata.schema_version == 3
+    assert metadata.database_generation == 3
     assert db.binding_path.is_file()
     assert path.is_file()
     assert path.stat().st_mode & 0o777 == 0o600
@@ -51,10 +59,10 @@ async def test_archive_create_reopen_and_identity_binding(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_v1_archive_migrates_to_v2_without_changing_identity_or_cloud_rows(
+async def test_v1_archive_migrates_to_v3_without_changing_identity_or_cloud_rows(
     tmp_path: Path,
 ):
-    """S4 forward migration preserves an identity-qualified S3 archive."""
+    """S5 forward migrations preserve an identity-qualified S3 archive."""
     path = tmp_path / "combustion" / "archive.sqlite3"
     path.parent.mkdir(parents=True)
     archive_id = "11111111-2222-3333-4444-555555555555"
@@ -126,9 +134,9 @@ async def test_v1_archive_migrates_to_v2_without_changing_identity_or_cloud_rows
     migrated = await db.async_start(allow_create=False)
 
     assert migrated.archive_id == archive_id
-    assert migrated.schema_version == 2
-    assert migrated.minimum_reader_version == 2
-    assert migrated.database_generation == 2
+    assert migrated.schema_version == 3
+    assert migrated.minimum_reader_version == 3
+    assert migrated.database_generation == 3
     assert migrated.path_binding_hash == binding_hash
 
     preserved = await db.async_read(
@@ -143,19 +151,115 @@ async def test_v1_archive_migrates_to_v2_without_changing_identity_or_cloud_rows
                 "SELECT name FROM sqlite_master "
                 "WHERE type='table' AND name IN "
                 "('local_sources','local_capture_runs','local_observations',"
-                "'local_capture_gaps') ORDER BY name"
+                "'local_capture_gaps','identity_links') ORDER BY name"
             ).fetchall(),
         )
     )
     assert preserved[:3] == (1, 1, 1)
-    assert preserved[3] == [(1,), (2,)]
+    assert preserved[3] == [(1,), (2,), (3,)]
     assert preserved[4] == [
+        ("identity_links",),
         ("local_capture_gaps",),
         ("local_capture_runs",),
         ("local_observations",),
         ("local_sources",),
     ]
 
+    await db.async_stop()
+
+
+@pytest.mark.asyncio
+async def test_v2_archive_migrates_to_v3_preserving_s4_local_rows(tmp_path: Path):
+    """S5 migration preserves an accepted S4 local archive boundary."""
+    path = tmp_path / "combustion" / "archive.sqlite3"
+    path.parent.mkdir(parents=True)
+    archive_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    binding_hash = hashlib.sha256(
+        (archive_id + "\0" + os.path.abspath(path)).encode()
+    ).hexdigest()
+
+    conn = sqlite3.connect(path, isolation_level=None)
+    install_schema_v1(
+        conn,
+        archive_id=archive_id,
+        application_fingerprint="s3-fixture",
+        path_binding_hash=binding_hash,
+    )
+    conn.executescript("BEGIN IMMEDIATE;\n" + SCHEMA_V2_SQL)
+    conn.execute(
+        """
+        UPDATE archive_meta
+        SET schema_version=2,
+            minimum_reader_version=2,
+            database_generation=2,
+            application_fingerprint='s4-fixture'
+        WHERE id=1
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO schema_migrations(
+            version,checksum,applied_at_us,application_fingerprint
+        ) VALUES(2,?,?,?)
+        """,
+        (SCHEMA_V2_CHECKSUM, 1_790_000_000_000_000, "s4-fixture"),
+    )
+    conn.execute("COMMIT")
+    conn.execute(
+        """
+        INSERT INTO local_sources(
+            local_source_id,subject_kind,raw_serial,first_seen_us,last_seen_us
+        ) VALUES('local-probe','probe','10014e68',1,2)
+        """
+    )
+    conn.close()
+
+    binding = path.with_name("archive.binding.json")
+    binding.write_text(
+        json.dumps(
+            {
+                "binding_version": 1,
+                "archive_id": archive_id,
+                "database_path": str(path),
+                "path_binding_hash": binding_hash,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    )
+    os.chmod(binding, 0o600)
+
+    db = ArchiveDatabase(
+        path,
+        require_qualified_wal=False,
+        application_fingerprint="s5-test",
+    )
+    migrated = await db.async_start(allow_create=False)
+
+    assert migrated.archive_id == archive_id
+    assert migrated.schema_version == 3
+    assert migrated.minimum_reader_version == 3
+    assert migrated.database_generation == 3
+
+    preserved = await db.async_read(
+        lambda read: (
+            read.execute(
+                "SELECT subject_kind,raw_serial FROM local_sources"
+            ).fetchall(),
+            read.execute(
+                "SELECT version FROM schema_migrations ORDER BY version"
+            ).fetchall(),
+            read.execute(
+                "SELECT COUNT(*) FROM identity_links"
+            ).fetchone()[0],
+        )
+    )
+    assert preserved == (
+        [("probe", "10014e68")],
+        [(1,), (2,), (3,)],
+        0,
+    )
     await db.async_stop()
 
 
@@ -271,6 +375,146 @@ async def test_cancelled_await_does_not_claim_disk_work_stopped(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_cancelled_write_waiter_cannot_hide_storage_failure(tmp_path: Path):
+    """Writer-owned failure fencing survives cancellation of the async caller."""
+    path = tmp_path / "archive.sqlite3"
+    db = ArchiveDatabase(path, require_qualified_wal=False)
+    await db.async_start(allow_create=True)
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def failing_write(_conn: sqlite3.Connection) -> None:
+        started.set()
+        assert release.wait(5)
+        raise sqlite3.OperationalError("synthetic disk failure")
+
+    task = asyncio.create_task(db.async_write(failing_write))
+    assert await asyncio.to_thread(started.wait, 2)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    release.set()
+    for _ in range(100):
+        if db.health.error_category == "storage_write":
+            break
+        await asyncio.sleep(0.01)
+    else:
+        pytest.fail("writer-owned storage failure was not published")
+
+    assert db.health.status is ArchiveStatus.DEGRADED
+    assert db.accepting is False
+    with pytest.raises(ArchiveError, match="not accepting"):
+        await db.async_write(lambda conn: conn.execute("SELECT 1"))
+
+    await db.async_stop()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_timeout_includes_running_reader_and_eventual_cleanup(
+    tmp_path: Path,
+):
+    """A blocked reader returns a bounded stop error and keeps ownership fenced."""
+    path = tmp_path / "archive.sqlite3"
+    db = ArchiveDatabase(path, require_qualified_wal=False)
+    await db.async_start(allow_create=True)
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocked_read(_conn: sqlite3.Connection) -> int:
+        started.set()
+        assert release.wait(5)
+        return 1
+
+    read_task = asyncio.create_task(db.async_read(blocked_read))
+    assert await asyncio.to_thread(started.wait, 2)
+
+    loop = asyncio.get_running_loop()
+    began = loop.time()
+    with pytest.raises(ArchiveShutdownIncomplete, match="shutdown timeout"):
+        await db.async_stop(timeout=0.05)
+    elapsed = loop.time() - began
+
+    assert elapsed < 0.30
+    assert db.health.status is ArchiveStatus.DEGRADED
+    assert db.health.error_category == "shutdown_incomplete"
+
+    second = ArchiveDatabase(path, require_qualified_wal=False)
+    with pytest.raises(ArchiveBusyError):
+        await second.async_start(allow_create=False)
+
+    with pytest.raises(ArchiveError):
+        await db.async_read(lambda conn: conn.execute("SELECT 1").fetchone())
+
+    release.set()
+    assert await read_task == 1
+
+    for _ in range(100):
+        if db.health.status is ArchiveStatus.STOPPED:
+            break
+        await asyncio.sleep(0.01)
+    else:
+        pytest.fail("archive ownership fence did not clear after reader completed")
+
+    reopened = ArchiveDatabase(path, require_qualified_wal=False)
+    await reopened.async_start(allow_create=False)
+    await reopened.async_stop()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_timeout_includes_running_backup_and_eventual_cleanup(
+    tmp_path: Path,
+    monkeypatch,
+):
+    """A running backup cannot make unload wait past the configured timeout."""
+    path = tmp_path / "combustion" / "archive.sqlite3"
+    db = ArchiveDatabase(path, require_qualified_wal=False)
+    await db.async_start(allow_create=True)
+
+    started = threading.Event()
+    release = threading.Event()
+    original = db._backup_sync
+
+    def blocked_backup(destination: Path):
+        started.set()
+        assert release.wait(5)
+        return original(destination)
+
+    monkeypatch.setattr(db, "_backup_sync", blocked_backup)
+    destination = path.parent / "backups" / "blocked.sqlite3"
+    backup_task = asyncio.create_task(db.async_backup(destination))
+    assert await asyncio.to_thread(started.wait, 2)
+
+    loop = asyncio.get_running_loop()
+    began = loop.time()
+    with pytest.raises(ArchiveShutdownIncomplete, match="shutdown timeout"):
+        await db.async_stop(timeout=0.05)
+    assert loop.time() - began < 0.30
+
+    second = ArchiveDatabase(path, require_qualified_wal=False)
+    with pytest.raises(ArchiveBusyError):
+        await second.async_start(allow_create=False)
+
+    release.set()
+    result = await backup_task
+    assert Path(result["database"]).is_file()
+
+    for _ in range(100):
+        if db.health.status is ArchiveStatus.STOPPED:
+            break
+        await asyncio.sleep(0.01)
+    else:
+        pytest.fail("archive ownership fence did not clear after backup completed")
+
+    reopened = ArchiveDatabase(path, require_qualified_wal=False)
+    await reopened.async_start(allow_create=False)
+    await reopened.async_stop()
+
+
+@pytest.mark.asyncio
 async def test_consistent_backup_reopens_and_validates_semantics(tmp_path: Path):
     """Online backup produces a closed copy with hash/schema/count validation."""
     path = tmp_path / "combustion" / "archive.sqlite3"
@@ -303,7 +547,8 @@ async def test_consistent_backup_reopens_and_validates_semantics(tmp_path: Path)
 
     validated = ArchiveDatabase.validate_backup_sync(destination, manifest)
     assert validated["archive_id"] == metadata.archive_id
-    assert validated["schema_version"] == 2
+    assert validated["schema_version"] == 3
+    assert validated["counts"]["identity_links"] == 0
 
     await db.async_stop()
 
@@ -347,6 +592,49 @@ async def test_backup_validator_rejects_db_backed_manifest_tamper(tmp_path: Path
     binding.write_bytes(binding_bytes)
     ArchiveDatabase.validate_backup_sync(destination, manifest)
     await db.async_stop()
+
+
+@pytest.mark.asyncio
+async def test_backup_validator_rejects_foreign_key_invalid_snapshot(
+    tmp_path: Path,
+):
+    """A hash-consistent backup must still satisfy archive FK invariants."""
+    path = tmp_path / "combustion" / "archive.sqlite3"
+    db = ArchiveDatabase(
+        path,
+        require_qualified_wal=False,
+        application_fingerprint="test-fingerprint",
+    )
+    await db.async_start(allow_create=True)
+    destination = path.parent / "backups" / "archive-fk-test.sqlite3"
+    result = await db.async_backup(destination)
+    await db.async_stop()
+
+    manifest = Path(result["manifest"])
+    payload = json.loads(manifest.read_text())
+
+    conn = sqlite3.connect(destination, isolation_level=None)
+    conn.execute("PRAGMA foreign_keys=OFF")
+    conn.execute(
+        """
+        INSERT INTO cloud_sessions(
+            session_id,source_device_id,source_session_token,index_id,
+            first_seen_us,last_seen_us,identity_state
+        ) VALUES(
+            'orphan-session','missing-source','999',NULL,
+            1,1,'source_only'
+        )
+        """
+    )
+    conn.close()
+
+    payload["database_bytes"] = destination.stat().st_size
+    payload["sha256"] = hashlib.sha256(destination.read_bytes()).hexdigest()
+    payload["counts"]["cloud_sessions"] += 1
+    manifest.write_text(json.dumps(payload))
+
+    with pytest.raises(ArchiveError, match="foreign-key"):
+        ArchiveDatabase.validate_backup_sync(destination, manifest)
 
 
 @pytest.mark.asyncio
@@ -463,3 +751,204 @@ def test_sqlite_wal_fix_qualification_is_conservative(
 ):
     """Unknown release lines are not silently declared WAL-safe."""
     assert sqlite_wal_fix_qualified(version) is expected
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("10014e68", "10014E68"),
+        ("0A1B2C3D", "0A1B2C3D"),
+        ("a1b2c3d", "0A1B2C3D"),
+        ("00000001", "00000001"),
+        ("", None),
+        ("0", None),
+        ("not-hex", None),
+        ("100000000", None),
+        ("1_2", None),
+        ("0x12", None),
+        ("+12", None),
+        ("１２", None),
+    ],
+)
+def test_s5_probe_serial_normalization(value: str, expected: str | None):
+    """Cloud/local serial formatting is normalized without fuzzy matching."""
+    assert canonical_probe_serial(value) == expected
+
+
+@pytest.mark.asyncio
+async def test_s5_exact_serial_link_is_durable_and_idempotent(tmp_path: Path):
+    """One exact physical serial links one cloud source to one local probe."""
+    db = ArchiveDatabase(tmp_path / "archive.sqlite3", require_qualified_wal=False)
+    await db.async_start(allow_create=True)
+
+    def seed(conn):
+        now = 1_790_000_000_000_000
+        conn.execute(
+            """
+            INSERT INTO accounts(
+                account_id,provider,project,subject_ref,created_at_us,archived
+            ) VALUES('acct','firebase','combustion-production-apps','subject',?,0)
+            """,
+            (now,),
+        )
+        conn.execute(
+            """
+            INSERT INTO source_devices(
+                source_device_id,account_id,source_kind,provider_type,raw_serial,
+                source_key,provider_locator,first_seen_us,last_seen_us
+            ) VALUES(
+                'cloud-src','acct','cloud_probe',1,'0A1B2C3D',
+                'cloud-probe:test','provider-locator',?,?
+            )
+            """,
+            (now, now),
+        )
+        conn.execute(
+            """
+            INSERT INTO local_sources(
+                local_source_id,subject_kind,raw_serial,first_seen_us,last_seen_us
+            ) VALUES('local-src','probe','a1b2c3d',?,?)
+            """,
+            (now, now),
+        )
+
+    await db.async_write(seed)
+    links = SourceLinkRepository(db)
+    first = await links.async_reconcile()
+    second = await links.async_reconcile()
+
+    assert first["linked"] == 1
+    assert first["unresolved"] == 0
+    assert first["ambiguous"] == 0
+    assert second["linked"] == 0
+    assert second["unchanged"] == 1
+
+    row = await db.async_read(
+        lambda conn: conn.execute(
+            """
+            SELECT canonical_serial,evidence_kind,evidence_json,
+                   ended_at_us,end_reason
+            FROM identity_links
+            """
+        ).fetchone()
+    )
+    assert row[0] == "0A1B2C3D"
+    assert row[1] == "exact_serial"
+    assert '"cloud_raw_serial":"0A1B2C3D"' in row[2]
+    assert '"local_raw_serial":"a1b2c3d"' in row[2]
+    assert '"serial_parser_policy":1' in row[2]
+    assert row[3:] == (None, None)
+    assert (await links.async_counts())["active_links"] == 1
+    await db.async_stop()
+
+
+@pytest.mark.asyncio
+async def test_s5_unmatched_serial_is_not_linked(tmp_path: Path):
+    """No local exact serial evidence leaves the cloud source unresolved."""
+    db = ArchiveDatabase(tmp_path / "archive.sqlite3", require_qualified_wal=False)
+    await db.async_start(allow_create=True)
+
+    def seed(conn):
+        now = 1_790_000_000_000_000
+        conn.execute(
+            """
+            INSERT INTO accounts(
+                account_id,provider,project,subject_ref,created_at_us,archived
+            ) VALUES('acct','firebase','combustion-production-apps','subject',?,0)
+            """,
+            (now,),
+        )
+        conn.execute(
+            """
+            INSERT INTO source_devices(
+                source_device_id,account_id,source_kind,provider_type,raw_serial,
+                source_key,provider_locator,first_seen_us,last_seen_us
+            ) VALUES(
+                'cloud-src','acct','cloud_probe',1,'0A1B2C3D',
+                'cloud-probe:test','provider-locator',?,?
+            )
+            """,
+            (now, now),
+        )
+        conn.execute(
+            """
+            INSERT INTO local_sources(
+                local_source_id,subject_kind,raw_serial,first_seen_us,last_seen_us
+            ) VALUES('local-src','probe','10014e68',?,?)
+            """,
+            (now, now),
+        )
+
+    await db.async_write(seed)
+    links = SourceLinkRepository(db)
+    result = await links.async_reconcile()
+    assert result["linked"] == 0
+    assert result["unresolved"] == 1
+    assert (await links.async_counts())["active_links"] == 0
+    await db.async_stop()
+
+
+@pytest.mark.asyncio
+async def test_s5_new_ambiguity_deactivates_prior_automatic_link(tmp_path: Path):
+    """An exact link cannot remain active after evidence becomes ambiguous."""
+    db = ArchiveDatabase(tmp_path / "archive.sqlite3", require_qualified_wal=False)
+    await db.async_start(allow_create=True)
+
+    def seed(conn):
+        now = 1_790_000_000_000_000
+        conn.execute(
+            """
+            INSERT INTO accounts(
+                account_id,provider,project,subject_ref,created_at_us,archived
+            ) VALUES('acct','firebase','combustion-production-apps','subject',?,0)
+            """,
+            (now,),
+        )
+        conn.execute(
+            """
+            INSERT INTO source_devices(
+                source_device_id,account_id,source_kind,provider_type,raw_serial,
+                source_key,provider_locator,first_seen_us,last_seen_us
+            ) VALUES(
+                'cloud-src','acct','cloud_probe',1,'0A1B2C3D',
+                'cloud-probe:test','provider-locator',?,?
+            )
+            """,
+            (now, now),
+        )
+        conn.execute(
+            """
+            INSERT INTO local_sources(
+                local_source_id,subject_kind,raw_serial,first_seen_us,last_seen_us
+            ) VALUES('local-a','probe','a1b2c3d',?,?)
+            """,
+            (now, now),
+        )
+
+    await db.async_write(seed)
+    links = SourceLinkRepository(db)
+    assert (await links.async_reconcile())["linked"] == 1
+
+    await db.async_write(
+        lambda conn: conn.execute(
+            """
+            INSERT INTO local_sources(
+                local_source_id,subject_kind,raw_serial,first_seen_us,last_seen_us
+            ) VALUES('local-b','probe','0a1b2c3d',1,2)
+            """
+        )
+    )
+
+    result = await links.async_reconcile()
+    assert result["ambiguous"] == 1
+    counts = await links.async_counts()
+    assert counts["active_links"] == 0
+    assert counts["total_links"] == 1
+    row = await db.async_read(
+        lambda conn: conn.execute(
+            "SELECT ended_at_us,end_reason FROM identity_links"
+        ).fetchone()
+    )
+    assert row[0] is not None
+    assert row[1] == "ambiguous_exact_serial"
+    await db.async_stop()

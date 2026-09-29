@@ -24,6 +24,8 @@ async def async_get_config_entry_diagnostics(
     sync = runtime.sync_health
     capture = runtime.local_capture_health
     selection = runtime.probe_manager.observation_counters
+    source_links = runtime.source_link_health
+    projection = runtime.statistics_projection_health
     return {
         "cloud": {
             "linked": cloud_linked(entry.data),
@@ -54,6 +56,25 @@ async def async_get_config_entry_diagnostics(
             "ready_work": sync.ready_work,
             "running_work": sync.running_work,
             "failed_work": sync.failed_work,
+        },
+        "source_links": {
+            "status": source_links.status,
+            "cloud_probe_sources": source_links.cloud_probe_sources,
+            "local_probe_sources": source_links.local_probe_sources,
+            "active_links": source_links.active_links,
+            "unresolved_cloud_sources": source_links.unresolved_cloud_sources,
+            "ambiguous_cloud_sources": source_links.ambiguous_cloud_sources,
+            "last_reconcile_us": source_links.last_reconcile_us,
+            "last_error_category": source_links.last_error_category,
+        },
+        "statistics_projection": {
+            "status": projection.status,
+            "linked_sources": projection.linked_sources,
+            "resolved_entities": projection.resolved_entities,
+            "queued_hours": projection.queued_hours,
+            "skipped_existing_hours": projection.skipped_existing_hours,
+            "last_run_us": projection.last_run_us,
+            "last_error_category": projection.last_error_category,
         },
         "local_capture": {
             "status": capture.status,

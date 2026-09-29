@@ -252,23 +252,41 @@ def _subtract_coverage(
     return missing
 
 
-def _first_missing_chunk(
-    conn: sqlite3.Connection, session_id: str, manifest_id: str
+def _first_missing_chunk_after(
+    conn: sqlite3.Connection,
+    session_id: str,
+    manifest_id: str,
+    prior_end: int | None,
 ) -> tuple[int, int] | None:
-    for start, end in conn.execute(
+    """Return the first uncovered bounded chunk strictly after prior_end."""
+    for raw_start, raw_end in conn.execute(
         """
         SELECT start_seq,end_seq FROM manifest_ranges
         WHERE manifest_id=? ORDER BY start_seq
         """,
         (manifest_id,),
     ):
+        start = int(raw_start)
+        end = int(raw_end)
+        if prior_end is not None:
+            start = max(start, prior_end + 1)
+        if start > end:
+            continue
         missing = _subtract_coverage(
-            int(start), int(end), _coverage_for(conn, session_id, int(start), int(end))
+            start,
+            end,
+            _coverage_for(conn, session_id, start, end),
         )
         if missing:
             first, last = missing[0]
             return first, min(last, first + CHUNK_SIZE - 1)
     return None
+
+
+def _first_missing_chunk(
+    conn: sqlite3.Connection, session_id: str, manifest_id: str
+) -> tuple[int, int] | None:
+    return _first_missing_chunk_after(conn, session_id, manifest_id, None)
 
 
 def _next_manifest_chunk_after(
@@ -1253,12 +1271,22 @@ class ArchiveRepository:
                 for start, end in _contiguous(present):
                     _merge_coverage(conn, work.session_id, start, end)
 
-                missing = _subtract_coverage(
+                coverage_missing = _subtract_coverage(
                     work.start_seq,
                     work.end_seq,
                     _coverage_for(
                         conn, work.session_id, work.start_seq, work.end_seq
                     ),
+                )
+                response_missing = _subtract_coverage(
+                    work.start_seq,
+                    work.end_seq,
+                    _contiguous(sorted(unique_rows)),
+                )
+                missing = (
+                    response_missing
+                    if work.kind == "audit"
+                    else coverage_missing
                 )
                 conn.execute(
                     """
@@ -1275,9 +1303,10 @@ class ArchiveRepository:
                         work.end_seq,
                     ),
                 )
-                missing_rows = 0
-                for start, end in missing:
-                    missing_rows += end - start + 1
+                missing_rows = sum(
+                    end - start + 1 for start, end in missing
+                )
+                for start, end in coverage_missing:
                     try:
                         conn.execute(
                             """
@@ -1338,29 +1367,65 @@ class ArchiveRepository:
                         now,
                     ),
                 )
-                conn.execute(
-                    """
-                    UPDATE sync_work SET state='done',last_error=NULL,updated_at_us=?
-                    WHERE work_id=?
-                    """,
-                    (now, work.work_id),
-                )
-
                 if missing:
                     first, end = missing[0]
-                    _enqueue_work(
-                        conn,
-                        kind="sample" if work.kind == "sample" else "audit",
-                        session_id=work.session_id,
-                        manifest_id=work.manifest_id,
-                        start_seq=first,
-                        end_seq=min(end, first + CHUNK_SIZE - 1),
-                        priority=80 if work.kind == "sample" else 210,
-                        not_before_us=now + MISSING_RETRY_US,
+                    repair_end = min(end, first + CHUNK_SIZE - 1)
+                    exhausted = work.attempts >= MAX_WORK_ATTEMPTS
+                    conn.execute(
+                        """
+                        UPDATE sync_work
+                        SET state=?,start_seq=?,end_seq=?,not_before_us=?,
+                            last_error=?,updated_at_us=?
+                        WHERE work_id=?
+                        """,
+                        (
+                            "failed" if exhausted else "ready",
+                            first,
+                            repair_end,
+                            now + MISSING_RETRY_US,
+                            (
+                                "audit_incomplete"
+                                if work.kind == "audit"
+                                else "source_missing"
+                            ),
+                            now,
+                            work.work_id,
+                        ),
                     )
-                elif work.kind == "sample":
-                    nxt = _first_missing_chunk(
-                        conn, work.session_id, work.manifest_id
+                    if exhausted and work.kind != "audit":
+                        conn.execute(
+                            """
+                            UPDATE gaps SET retry_state='failed',last_seen_us=?
+                            WHERE scope='cloud_sequence'
+                              AND session_id=? AND manifest_id=?
+                              AND reason='source_missing'
+                              AND retry_state!='resolved'
+                              AND end_seq>=? AND start_seq<=?
+                            """,
+                            (
+                                now,
+                                work.session_id,
+                                work.manifest_id,
+                                first,
+                                repair_end,
+                            ),
+                        )
+                else:
+                    conn.execute(
+                        """
+                        UPDATE sync_work
+                        SET state='done',last_error=NULL,updated_at_us=?
+                        WHERE work_id=?
+                        """,
+                        (now, work.work_id),
+                    )
+
+                if work.kind == "sample":
+                    nxt = _first_missing_chunk_after(
+                        conn,
+                        work.session_id,
+                        work.manifest_id,
+                        work.end_seq,
                     )
                     if nxt is not None:
                         _enqueue_work(
@@ -1386,7 +1451,7 @@ class ArchiveRepository:
                             end_seq=nxt[1],
                             priority=210,
                         )
-                    else:
+                    elif not missing:
                         conn.execute(
                             """
                             UPDATE cloud_sessions SET last_full_audit_us=?

@@ -15,6 +15,7 @@ from custom_components.combustion.cloud.models import (
 from custom_components.combustion.storage.database import ArchiveDatabase
 from custom_components.combustion.storage.repository import (
     MANIFEST_RECHECK_US,
+    MISSING_RETRY_US,
     ArchiveRepository,
     LocalCaptureGapRecord,
     LocalObservationRecord,
@@ -363,6 +364,160 @@ async def test_partial_response_creates_gap_and_later_fill_resolves_it(
     counts = await repo.async_archive_counts()
     assert counts["samples"] == 3
     assert counts["open_gaps"] == 0
+    await db.async_stop()
+
+
+@pytest.mark.asyncio
+async def test_permanent_early_hole_does_not_starve_forward_acquisition(
+    tmp_path: Path,
+):
+    """A retryable early hole cannot monopolize later manifest ranges."""
+    db = await _database(tmp_path)
+    repo = ArchiveRepository(db)
+    account_id, _, first = await _prepare_sample_work(
+        repo,
+        ranges=((0, 1999),),
+    )
+    assert (first.start_seq, first.end_seq, first.attempts) == (0, 999, 1)
+
+    def row(sequence: int) -> SampleRow:
+        raw = {"sequence_number": sequence, "t1": float(sequence)}
+        return SampleRow(
+            sequence=sequence,
+            sampled_at=None,
+            fields={"t1": float(sequence)},
+            invalid_fields=(),
+            raw=raw,
+        )
+
+    result = await repo.async_commit_sample_work(
+        first,
+        [row(sequence) for sequence in range(1, 1000)],
+    )
+    assert result["missing_rows"] == 1
+
+    forward = await repo.async_claim_work(
+        account_id=account_id,
+        now_us=utc_now_us() + 1,
+    )
+    assert forward is not None
+    assert forward.work_id != first.work_id
+    assert (forward.start_seq, forward.end_seq) == (1000, 1999)
+    await repo.async_commit_sample_work(
+        forward,
+        [row(sequence) for sequence in range(1000, 2000)],
+    )
+
+    repair = await repo.async_claim_work(
+        account_id=account_id,
+        now_us=utc_now_us() + MISSING_RETRY_US + 1,
+    )
+    assert repair is not None
+    assert repair.work_id == first.work_id
+    assert (repair.start_seq, repair.end_seq, repair.attempts) == (0, 0, 2)
+    await repo.async_commit_sample_work(repair, [])
+
+    second_repair = await repo.async_claim_work(
+        account_id=account_id,
+        now_us=utc_now_us() + MISSING_RETRY_US + 1,
+    )
+    assert second_repair is not None
+    assert second_repair.work_id == first.work_id
+    assert second_repair.attempts == 3
+    assert (second_repair.start_seq, second_repair.end_seq) == (0, 0)
+
+    counts = await repo.async_archive_counts()
+    assert counts["samples"] == 1999
+    assert counts["open_gaps"] == 1
+    await db.async_stop()
+
+
+@pytest.mark.asyncio
+async def test_empty_audit_response_does_not_claim_fresh_complete_source(
+    tmp_path: Path,
+):
+    """Retained archive coverage is distinct from rows re-observed by an audit."""
+    db = await _database(tmp_path)
+    repo = ArchiveRepository(db)
+    account_id, manifest, sample_work = await _prepare_sample_work(
+        repo,
+        ranges=((0, 1),),
+    )
+    await repo.async_commit_sample_work(
+        sample_work,
+        [_row(0, t1=20.0), _row(1, t1=21.0)],
+    )
+
+    manifest_work = await repo.async_claim_work(
+        account_id=account_id,
+        now_us=utc_now_us() + MANIFEST_RECHECK_US + 1,
+    )
+    assert manifest_work is not None
+    assert manifest_work.kind == "manifest"
+    await repo.async_complete_manifest(
+        manifest_work,
+        SessionMeta(
+            "2026-01-01T00:00:00Z",
+            ((0, 1),),
+            {
+                "started_at": "2026-01-01T00:00:00Z",
+                "sequence_number_ranges": [[0, 1]],
+            },
+        ),
+    )
+
+    audit = await repo.async_claim_work(
+        account_id=account_id,
+        now_us=utc_now_us() + 1,
+    )
+    assert audit is not None
+    assert audit.kind == "audit"
+
+    result = await repo.async_commit_sample_work(audit, [])
+    assert result["committed_rows"] == 0
+    assert result["missing_rows"] == 2
+
+    evidence = await db.async_read(
+        lambda conn: (
+            conn.execute(
+                """
+                SELECT state,attempts,last_error
+                FROM sync_work
+                WHERE work_id=?
+                """,
+                (audit.work_id,),
+            ).fetchone(),
+            conn.execute(
+                """
+                SELECT last_full_audit_us
+                FROM cloud_sessions
+                WHERE session_id=?
+                """,
+                (audit.session_id,),
+            ).fetchone()[0],
+            conn.execute(
+                "SELECT COUNT(*) FROM cloud_samples"
+            ).fetchone()[0],
+            conn.execute(
+                """
+                SELECT COUNT(*) FROM gaps
+                WHERE retry_state!='resolved'
+                """
+            ).fetchone()[0],
+            conn.execute(
+                """
+                SELECT missing_rows
+                FROM sync_receipts
+                WHERE work_id=?
+                ORDER BY committed_at_us DESC
+                LIMIT 1
+                """,
+                (audit.work_id,),
+            ).fetchone()[0],
+        )
+    )
+    assert evidence == (("ready", 1, "audit_incomplete"), None, 2, 0, 2)
+    assert manifest.manifest_id == audit.manifest_id
     await db.async_stop()
 
 

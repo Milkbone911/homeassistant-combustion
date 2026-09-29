@@ -184,8 +184,10 @@ async def _async_start_archive(
         if local_capture_enabled:
             runtime.local_capture_health.status = LocalCaptureStatus.DEGRADED
             runtime.local_capture_health.last_error_category = "archive_unavailable"
-        # Archive failure never removes basic cloud-link health from diagnostics.
-        if cloud_linked(entry.data):
+        # Fall back to one cloud check only when archive/sync startup was
+        # the intended cloud-client owner. When sync is disabled, setup already
+        # owns the ordinary one-shot check and must not race a duplicate here.
+        if cloud_sync_enabled and cloud_linked(entry.data):
             await async_check_linked_account(hass, entry, runtime.cloud_health)
         return
 
