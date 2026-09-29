@@ -711,6 +711,18 @@ class ProjectionRepository:
                     raise ProjectionPlanError("Projection job not found")
                 if job[0] not in ("planned", "partial"):
                     raise ProjectionPlanError("Projection job is not executable")
+                competing = conn.execute(
+                    """
+                    SELECT projection_job_id FROM projection_jobs
+                    WHERE target_kind='external_statistics'
+                      AND projection_job_id!=?
+                      AND state IN ('planned','running')
+                    LIMIT 1
+                    """,
+                    (job_id,),
+                ).fetchone()
+                if competing is not None:
+                    raise ProjectionPlanError("Another projection job is active")
                 conn.execute(
                     """
                     UPDATE projection_jobs
@@ -1131,8 +1143,10 @@ class ProjectionRepository:
             ).fetchone()
             if row is None:
                 raise ProjectionPlanError("Projection job not found")
-            if row[0] == "confirmed":
-                raise ProjectionPlanError("Confirmed projection job cannot be cancelled")
+            if row[0] != "planned":
+                raise ProjectionPlanError(
+                    "Only a planned projection job can be cancelled safely"
+                )
             conn.execute("BEGIN IMMEDIATE")
             try:
                 conn.execute(
