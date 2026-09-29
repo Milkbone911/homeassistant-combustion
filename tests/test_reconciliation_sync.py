@@ -380,6 +380,42 @@ async def test_unsupported_session_token_is_durably_classified(
     await database.async_stop()
 
 
+@pytest.mark.parametrize(
+    "failure",
+    [
+        CloudAuthError("stale auth"),
+        CloudPermissionError("stale permission"),
+        CloudTransportError("stale transport"),
+        CloudSchemaError("stale schema"),
+    ],
+)
+def test_stale_generation_failure_publication_is_fenced(failure: Exception):
+    """Old-generation failures cannot publish health or reauth the replacement."""
+    entry = _entry()
+    cloud_health = CloudLinkHealth()
+    sync_health = SyncHealth()
+    supervisor = CloudSyncSupervisor(
+        MagicMock(),
+        entry,
+        MagicMock(),
+        cloud_health,
+        sync_health,
+    )
+    supervisor._generation = 1
+    supervisor._subject = "subject-a"
+
+    entry.data = {
+        "cloud_link_generation": 2,
+        "cloud_subject": "subject-b",
+    }
+    supervisor._publish_failure(failure)
+
+    entry.async_start_reauth.assert_not_called()
+    assert sync_health.status is SyncStatus.STOPPED
+    assert sync_health.last_error_category == "link_changed"
+    assert cloud_health.error_category is None
+
+
 @pytest.mark.asyncio
 async def test_link_generation_change_after_network_blocks_archive_commit(
     tmp_path: Path, monkeypatch
