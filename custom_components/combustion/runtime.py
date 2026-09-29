@@ -74,6 +74,9 @@ class CombustionRuntime:
     source_link_repository: SourceLinkRepository | None = field(default=None, repr=False)
     projection_repository: ProjectionRepository | None = field(default=None, repr=False)
     projection_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+    projection_tasks: dict[str, asyncio.Task[Any]] = field(
+        default_factory=dict, repr=False
+    )
     sync_supervisor: CloudSyncSupervisor | None = field(default=None, repr=False)
     local_capture_supervisor: LocalCaptureSupervisor | None = field(
         default=None, repr=False
