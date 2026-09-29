@@ -459,9 +459,7 @@ CREATE TABLE projection_rows (
     last_error TEXT,
     created_at_us INTEGER NOT NULL,
     updated_at_us INTEGER NOT NULL,
-    UNIQUE(
-        statistic_id,hour_start_us,source_revision_hash,algorithm_version
-    )
+    UNIQUE(projection_job_id,statistic_id,hour_start_us)
 );
 CREATE INDEX idx_projection_rows_job_state
 ON projection_rows(projection_job_id,state,hour_start_us);
