@@ -691,6 +691,8 @@ class ArchiveDatabase:
             quick = dest.execute("PRAGMA quick_check").fetchone()
             if quick is None or quick[0] != "ok":
                 raise ArchiveSchemaError("Backup quick_check failed")
+            if dest.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                raise ArchiveSchemaError("Backup foreign-key validation failed")
             metadata = read_metadata(dest)
             counts = {
                 table: int(dest.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
@@ -860,6 +862,8 @@ class ArchiveDatabase:
             quick = conn.execute("PRAGMA quick_check").fetchone()
             if quick is None or quick[0] != "ok":
                 raise ArchiveError("Backup integrity check failed")
+            if conn.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                raise ArchiveError("Backup foreign-key validation failed")
             metadata = read_metadata_compatible(conn)
             if metadata.archive_id != payload.get("archive_id"):
                 raise ArchiveError("Backup archive identity mismatch")
