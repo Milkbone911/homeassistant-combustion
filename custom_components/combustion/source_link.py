@@ -11,6 +11,8 @@ from .storage.schema import canonical_json, utc_now_us
 
 _FIVE_MINUTES_US = 5 * 60 * 1_000_000
 _HOUR_US = 60 * 60 * 1_000_000
+SERIAL_PARSER_POLICY_VERSION = 1
+_ASCII_HEX = frozenset("0123456789abcdefABCDEF")
 PROJECTABLE_TEMPERATURE_FIELDS = (
     "virtual_core",
     "virtual_surface",
@@ -37,15 +39,14 @@ class ProjectionSource:
 
 
 def canonical_probe_serial(value: str) -> str | None:
-    """Normalize one observed 32-bit Combustion probe serial for exact matching."""
+    """Normalize the evidenced bare-ASCII-hex 32-bit probe serial syntax."""
     value = value.strip()
-    if not value or len(value) > 8:
+    if not 1 <= len(value) <= 8:
         return None
-    try:
-        number = int(value, 16)
-    except ValueError:
+    if any(character not in _ASCII_HEX for character in value):
         return None
-    if number <= 0 or number > 0xFFFFFFFF:
+    number = int(value, 16)
+    if number == 0:
         return None
     return f"{number:08X}"
 
@@ -152,6 +153,7 @@ class SourceLinkRepository:
                         "canonical_serial": canonical,
                         "cloud_raw_serial": str(cloud_raw_serial),
                         "local_raw_serial": local_raw_serial,
+                        "serial_parser_policy": SERIAL_PARSER_POLICY_VERSION,
                     }
                     evidence_json = canonical_json(evidence, max_bytes=16 * 1024)
                     conn.execute(
