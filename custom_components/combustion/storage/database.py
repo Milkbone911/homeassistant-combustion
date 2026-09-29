@@ -622,12 +622,12 @@ class ArchiveDatabase:
                 if abandoned.is_set():
                     return
 
-                def set_error() -> None:
+                def set_error(error: BaseException) -> None:
                     if not waiter.done():
-                        waiter.set_exception(err)
+                        waiter.set_exception(error)
 
                 with suppress(RuntimeError):
-                    loop.call_soon_threadsafe(set_error)
+                    loop.call_soon_threadsafe(set_error, err)
             else:
                 if abandoned.is_set():
                     return
