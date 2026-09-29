@@ -117,6 +117,10 @@ _BACKUP_COUNT_TABLES_V2 = _BACKUP_COUNT_TABLES_V1 + (
 _BACKUP_COUNT_TABLES_V3 = _BACKUP_COUNT_TABLES_V2 + (
     "identity_links",
 )
+_BACKUP_COUNT_TABLES_V4 = _BACKUP_COUNT_TABLES_V3 + (
+    "projection_jobs",
+    "projection_rows",
+)
 
 
 def _backup_count_tables(schema_version: int) -> tuple[str, ...]:
@@ -127,6 +131,8 @@ def _backup_count_tables(schema_version: int) -> tuple[str, ...]:
         return _BACKUP_COUNT_TABLES_V2
     if schema_version == 3:
         return _BACKUP_COUNT_TABLES_V3
+    if schema_version == 4:
+        return _BACKUP_COUNT_TABLES_V4
     raise ArchiveSchemaError("Backup schema version is unsupported")
 
 
