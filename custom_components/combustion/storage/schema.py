@@ -453,7 +453,8 @@ CREATE TABLE projection_rows (
     sample_count INTEGER NOT NULL CHECK (sample_count > 0),
     state TEXT NOT NULL
         CHECK (state IN (
-            'planned','queued','confirmed','failed','superseded'
+            'planned','submitting','queued','confirmed',
+            'failed','cancelled','superseded'
         )),
     result_digest TEXT,
     last_error TEXT,
