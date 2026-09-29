@@ -616,23 +616,29 @@ async def test_queue_overflow_prefers_dropping_regular_and_persists_loss(
     )
 
     # The transition is removed from the queue by the writer and held in its
-    # blocked first transaction. Later regular observations then exercise only
-    # the bounded queue's explicit regular-drop policy.
+    # blocked first transaction. Advance the policy's emission clock between
+    # regular points so this test exercises queue overflow rather than the
+    # independent one-second coalescing policy.
+    clock = [0.0]
+    monkeypatch.setattr(supervisor, "_emission_clock", lambda: clock[0])
     probes.emit(_probe_observation(20.0, monotonic=400.0, epoch=4_000.0))
     await asyncio.wait_for(writer_entered.wait(), 1)
 
-    for offset, value in enumerate((21.0, 22.0, 23.0, 24.0), start=2):
-        probes.emit(
-            _probe_observation(
-                value,
-                monotonic=400.0 + offset,
-                epoch=4_000.0 + offset,
+    try:
+        for offset, value in enumerate((21.0, 22.0, 23.0, 24.0), start=1):
+            clock[0] = float(offset)
+            probes.emit(
+                _probe_observation(
+                    value,
+                    monotonic=400.0 + offset,
+                    epoch=4_000.0 + offset,
+                )
             )
-        )
 
-    assert health.dropped_observations == 2
-    release_writer.set()
-    await supervisor.async_stop()
+        assert health.dropped_observations == 2
+    finally:
+        release_writer.set()
+        await supervisor.async_stop()
 
     gap = await database.async_read(
         lambda conn: conn.execute(
