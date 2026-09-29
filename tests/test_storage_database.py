@@ -557,6 +557,49 @@ async def test_backup_validator_rejects_db_backed_manifest_tamper(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_backup_validator_rejects_foreign_key_invalid_snapshot(
+    tmp_path: Path,
+):
+    """A hash-consistent backup must still satisfy archive FK invariants."""
+    path = tmp_path / "combustion" / "archive.sqlite3"
+    db = ArchiveDatabase(
+        path,
+        require_qualified_wal=False,
+        application_fingerprint="test-fingerprint",
+    )
+    await db.async_start(allow_create=True)
+    destination = path.parent / "backups" / "archive-fk-test.sqlite3"
+    result = await db.async_backup(destination)
+    await db.async_stop()
+
+    manifest = Path(result["manifest"])
+    payload = json.loads(manifest.read_text())
+
+    conn = sqlite3.connect(destination, isolation_level=None)
+    conn.execute("PRAGMA foreign_keys=OFF")
+    conn.execute(
+        """
+        INSERT INTO cloud_sessions(
+            session_id,source_device_id,source_session_token,index_id,
+            first_seen_us,last_seen_us,identity_state
+        ) VALUES(
+            'orphan-session','missing-source','999',NULL,
+            1,1,'source_only'
+        )
+        """
+    )
+    conn.close()
+
+    payload["database_bytes"] = destination.stat().st_size
+    payload["sha256"] = hashlib.sha256(destination.read_bytes()).hexdigest()
+    payload["counts"]["cloud_sessions"] += 1
+    manifest.write_text(json.dumps(payload))
+
+    with pytest.raises(ArchiveError, match="foreign-key"):
+        ArchiveDatabase.validate_backup_sync(destination, manifest)
+
+
+@pytest.mark.asyncio
 async def test_shutdown_checkpoint_failure_remains_fenced(
     tmp_path: Path, monkeypatch
 ):
