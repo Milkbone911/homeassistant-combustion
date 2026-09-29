@@ -119,6 +119,46 @@ async def test_connection_listener_fires_on_state_change(hass):
 
 
 @pytest.mark.asyncio
+async def test_throwing_connection_listener_does_not_block_other_listeners(hass):
+    """A bad connection consumer cannot block later consumers or state cleanup."""
+    mgr = _manager(hass)
+    states = []
+
+    def bad_listener():
+        raise RuntimeError("synthetic listener failure")
+
+    mgr.add_connection_listener(bad_listener)
+    mgr.add_connection_listener(
+        lambda: states.append(mgr.is_connected("SERIAL1"))
+    )
+
+    await mgr._on_connected("SERIAL1", _FakeClient())
+    assert states == [True]
+
+    mgr._on_disconnected("SERIAL1")
+    assert states == [True, False]
+    assert mgr.is_connected("SERIAL1") is False
+
+
+@pytest.mark.asyncio
+async def test_throwing_new_probe_listener_does_not_block_other_consumers(hass):
+    """A bad first-seen consumer cannot suppress healthy new-probe listeners."""
+    mgr = _manager(hass)
+    probe_data = object()
+    mgr._probe_data["SERIAL1"] = probe_data
+    seen = []
+
+    def bad_listener(_probe):
+        raise RuntimeError("synthetic new-probe listener failure")
+
+    mgr.add_new_probe_listener(bad_listener)
+    mgr.add_new_probe_listener(seen.append)
+
+    await mgr._on_connected("SERIAL1", _FakeClient())
+    assert seen == [probe_data]
+
+
+@pytest.mark.asyncio
 async def test_shutdown_awaits_task_teardown_before_returning(hass):
     """Shutdown must await a cancelled task's own unwinding, not just cancel it.
 
@@ -314,6 +354,11 @@ async def test_disconnect_happens_before_backoff_sleep(hass):
 
     mgr = _manager(hass)
     mgr._addresses["SERIAL1"] = "cc:cc:cc:cc:cc:cc"
+
+    def bad_listener():
+        raise RuntimeError("synthetic disconnect-listener failure")
+
+    mgr.add_connection_listener(bad_listener)
 
     events: list[str] = []
     attempts = 0
