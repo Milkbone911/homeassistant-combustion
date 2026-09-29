@@ -604,28 +604,54 @@ class ArchiveDatabase:
             self.health.status = ArchiveStatus.DEGRADED
             self.health.error_category = "storage_write"
 
-    @staticmethod
-    def _consume_wrapped_future(future: asyncio.Future[Any]) -> None:
-        """Consume abandoned wrapped-future errors without changing await semantics."""
-        if future.cancelled():
-            return
-        with suppress(Exception):
-            future.exception()
-
     async def async_write(self, fn: _WRITE[_T]) -> _T:
         """Serialize one connection-affine operation on the writer thread."""
         if not self._accepting:
             raise ArchiveError("Archive is not accepting writer work")
-        future: concurrent.futures.Future[_T] = concurrent.futures.Future()
-        future.add_done_callback(self._writer_command_done)
-        self._commands.put(_Command(fn, future))
+
+        loop = asyncio.get_running_loop()
+        command_future: concurrent.futures.Future[_T] = concurrent.futures.Future()
+        waiter: asyncio.Future[_T] = loop.create_future()
+        abandoned = threading.Event()
+
+        def deliver(source: concurrent.futures.Future[_T]) -> None:
+            """Consume the thread result and publish only to an active waiter."""
+            try:
+                result = source.result()
+            except BaseException as err:
+                if abandoned.is_set():
+                    return
+
+                def set_error() -> None:
+                    if not waiter.done():
+                        waiter.set_exception(err)
+
+                with suppress(RuntimeError):
+                    loop.call_soon_threadsafe(set_error)
+            else:
+                if abandoned.is_set():
+                    return
+
+                def set_result() -> None:
+                    if not waiter.done():
+                        waiter.set_result(result)
+
+                with suppress(RuntimeError):
+                    loop.call_soon_threadsafe(set_result)
+
+        command_future.add_done_callback(self._writer_command_done)
+        command_future.add_done_callback(deliver)
+        self._commands.put(_Command(fn, command_future))
         self.health.writer_queue_depth = self._commands.qsize()
-        wrapped = asyncio.wrap_future(future)
-        wrapped.add_done_callback(self._consume_wrapped_future)
-        protected = asyncio.shield(wrapped)
-        protected.add_done_callback(self._consume_wrapped_future)
         try:
-            result = await protected
+            result = await asyncio.shield(waiter)
+        except asyncio.CancelledError:
+            # Caller cancellation never cancels the writer-owned command.
+            # Mark the bridge abandoned so its later completion is consumed
+            # without creating an unobserved asyncio exception.
+            abandoned.set()
+            waiter.cancel()
+            raise
         except (sqlite3.Error, OSError):
             self._accepting = False
             self.health.status = ArchiveStatus.DEGRADED
