@@ -9,24 +9,8 @@ from dataclasses import dataclass
 from .storage.database import ArchiveDatabase
 from .storage.schema import canonical_json, utc_now_us
 
-_FIVE_MINUTES_US = 5 * 60 * 1_000_000
-_HOUR_US = 60 * 60 * 1_000_000
 SERIAL_PARSER_POLICY_VERSION = 1
 _ASCII_HEX = frozenset("0123456789abcdefABCDEF")
-PROJECTABLE_TEMPERATURE_FIELDS = (
-    "virtual_core",
-    "virtual_surface",
-    "virtual_ambient",
-    "t1",
-    "t2",
-    "t3",
-    "t4",
-    "t5",
-    "t6",
-    "t7",
-    "t8",
-)
-
 
 @dataclass(frozen=True, slots=True)
 class ProjectionSource:
@@ -279,72 +263,3 @@ class SourceLinkRepository:
 
         return await self.database.async_read(read)
 
-    async def async_hourly_temperature_statistics(
-        self,
-        source_device_id: str,
-        field: str,
-        *,
-        before_us: int,
-    ) -> tuple[dict[str, int | float], ...]:
-        """Aggregate selected cloud samples with HA-like five-minute weighting."""
-        if field not in PROJECTABLE_TEMPERATURE_FIELDS:
-            raise ValueError("Unsupported projected temperature field")
-        if before_us < 0:
-            raise ValueError("before_us must be nonnegative")
-
-        def read(conn: sqlite3.Connection) -> tuple[dict[str, int | float], ...]:
-            rows = conn.execute(
-                f"""
-                WITH five_minute AS (
-                    SELECT
-                        (versions.sampled_at_us / ?) * ? AS bucket_us,
-                        MIN(versions.{field}) AS min_value,
-                        MAX(versions.{field}) AS max_value,
-                        AVG(versions.{field}) AS mean_value
-                    FROM cloud_samples AS samples
-                    JOIN cloud_sample_versions AS versions
-                      ON versions.version_id=samples.selected_version_id
-                    JOIN cloud_sessions AS sessions
-                      ON sessions.session_id=samples.session_id
-                    WHERE sessions.source_device_id=?
-                      AND versions.sampled_at_us IS NOT NULL
-                      AND versions.sampled_at_us < ?
-                      AND versions.{field} IS NOT NULL
-                      AND instr(
-                          ',' || versions.valid_field_mask || ',',
-                          ',' || ? || ','
-                      ) > 0
-                    GROUP BY bucket_us
-                )
-                SELECT
-                    (bucket_us / ?) * ? AS hour_start_us,
-                    MIN(min_value),
-                    MAX(max_value),
-                    AVG(mean_value),
-                    COUNT(*)
-                FROM five_minute
-                GROUP BY hour_start_us
-                ORDER BY hour_start_us
-                """,
-                (
-                    _FIVE_MINUTES_US,
-                    _FIVE_MINUTES_US,
-                    source_device_id,
-                    before_us,
-                    field,
-                    _HOUR_US,
-                    _HOUR_US,
-                ),
-            ).fetchall()
-            return tuple(
-                {
-                    "start_us": int(row[0]),
-                    "min": float(row[1]),
-                    "max": float(row[2]),
-                    "mean": float(row[3]),
-                    "five_minute_buckets": int(row[4]),
-                }
-                for row in rows
-            )
-
-        return await self.database.async_read(read)
