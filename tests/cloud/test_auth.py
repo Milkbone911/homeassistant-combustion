@@ -11,6 +11,7 @@ from custom_components.combustion.cloud.auth import (
     TokenManager,
     parse_refresh_response,
 )
+from custom_components.combustion.cloud.ha import CloudLinkChangedError
 from custom_components.combustion.cloud.models import CloudAuthError, CloudSchemaError
 
 
@@ -108,6 +109,25 @@ async def test_short_token_lifetime_reuses_token_until_its_proportional_margin()
     assert len(calls) == 1
     now[0] += 25
     assert (await mgr.token()).generation == 2
+
+
+@pytest.mark.asyncio
+async def test_rotation_callback_preserves_link_change_classification():
+    """A stale-link persistence callback remains distinguishable from bad auth."""
+    async def refresh(_key, _token):
+        return fresh(refresh="replacement-secret")
+
+    async def link_changed(_old, _new):
+        raise CloudLinkChangedError("link changed")
+
+    mgr = TokenManager(
+        api_key="key",
+        refresh_token="original-secret",
+        refresh=refresh,
+        on_rotation=link_changed,
+    )
+    with pytest.raises(CloudLinkChangedError):
+        await mgr.token()
 
 
 @pytest.mark.asyncio
