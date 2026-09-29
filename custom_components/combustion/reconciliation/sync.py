@@ -235,9 +235,9 @@ class CloudSyncSupervisor:
         if self._client is None:
             raise CloudTransportError("Cloud sync client is unavailable")
         self._require_link()
-        session_id = numeric_session_token(work.source_session_token)
 
         try:
+            session_id = numeric_session_token(work.source_session_token)
             if work.kind == "manifest":
                 meta = await self._client.session_meta(work.serial, session_id)
                 self._require_link()
