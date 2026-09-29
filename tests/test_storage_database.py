@@ -375,6 +375,108 @@ async def test_cancelled_await_does_not_claim_disk_work_stopped(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_shutdown_timeout_includes_running_reader_and_eventual_cleanup(
+    tmp_path: Path,
+):
+    """A blocked reader returns a bounded stop error and keeps ownership fenced."""
+    path = tmp_path / "archive.sqlite3"
+    db = ArchiveDatabase(path, require_qualified_wal=False)
+    await db.async_start(allow_create=True)
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocked_read(_conn: sqlite3.Connection) -> int:
+        started.set()
+        assert release.wait(5)
+        return 1
+
+    read_task = asyncio.create_task(db.async_read(blocked_read))
+    assert await asyncio.to_thread(started.wait, 2)
+
+    loop = asyncio.get_running_loop()
+    began = loop.time()
+    with pytest.raises(ArchiveShutdownIncomplete, match="shutdown timeout"):
+        await db.async_stop(timeout=0.05)
+    elapsed = loop.time() - began
+
+    assert elapsed < 0.30
+    assert db.health.status is ArchiveStatus.DEGRADED
+    assert db.health.error_category == "shutdown_incomplete"
+
+    second = ArchiveDatabase(path, require_qualified_wal=False)
+    with pytest.raises(ArchiveBusyError):
+        await second.async_start(allow_create=False)
+
+    with pytest.raises(ArchiveError):
+        await db.async_read(lambda conn: conn.execute("SELECT 1").fetchone())
+
+    release.set()
+    assert await read_task == 1
+
+    for _ in range(100):
+        if db.health.status is ArchiveStatus.STOPPED:
+            break
+        await asyncio.sleep(0.01)
+    else:
+        pytest.fail("archive ownership fence did not clear after reader completed")
+
+    reopened = ArchiveDatabase(path, require_qualified_wal=False)
+    await reopened.async_start(allow_create=False)
+    await reopened.async_stop()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_timeout_includes_running_backup_and_eventual_cleanup(
+    tmp_path: Path,
+    monkeypatch,
+):
+    """A running backup cannot make unload wait past the configured timeout."""
+    path = tmp_path / "combustion" / "archive.sqlite3"
+    db = ArchiveDatabase(path, require_qualified_wal=False)
+    await db.async_start(allow_create=True)
+
+    started = threading.Event()
+    release = threading.Event()
+    original = db._backup_sync
+
+    def blocked_backup(destination: Path):
+        started.set()
+        assert release.wait(5)
+        return original(destination)
+
+    monkeypatch.setattr(db, "_backup_sync", blocked_backup)
+    destination = path.parent / "backups" / "blocked.sqlite3"
+    backup_task = asyncio.create_task(db.async_backup(destination))
+    assert await asyncio.to_thread(started.wait, 2)
+
+    loop = asyncio.get_running_loop()
+    began = loop.time()
+    with pytest.raises(ArchiveShutdownIncomplete, match="shutdown timeout"):
+        await db.async_stop(timeout=0.05)
+    assert loop.time() - began < 0.30
+
+    second = ArchiveDatabase(path, require_qualified_wal=False)
+    with pytest.raises(ArchiveBusyError):
+        await second.async_start(allow_create=False)
+
+    release.set()
+    result = await backup_task
+    assert Path(result["database"]).is_file()
+
+    for _ in range(100):
+        if db.health.status is ArchiveStatus.STOPPED:
+            break
+        await asyncio.sleep(0.01)
+    else:
+        pytest.fail("archive ownership fence did not clear after backup completed")
+
+    reopened = ArchiveDatabase(path, require_qualified_wal=False)
+    await reopened.async_start(allow_create=False)
+    await reopened.async_stop()
+
+
+@pytest.mark.asyncio
 async def test_consistent_backup_reopens_and_validates_semantics(tmp_path: Path):
     """Online backup produces a closed copy with hash/schema/count validation."""
     path = tmp_path / "combustion" / "archive.sqlite3"
