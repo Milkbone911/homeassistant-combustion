@@ -85,6 +85,7 @@ class CloudSyncSupervisor:
         self._subject: str | None = None
         self._account_id: str | None = None
         self._next_context_refresh_us = 0
+        self._discovery_error_category: str | None = None
         self._cycle_lock = asyncio.Lock()
 
     def _link_matches(self) -> bool:
@@ -131,6 +132,7 @@ class CloudSyncSupervisor:
         self.cloud_health.verified_generation = generation
 
         now = utc_now_us()
+        self._discovery_error_category = None
         for probe in probes:
             source = sources[probe.serial]
             if not await self.repository.async_discovery_due(
@@ -174,11 +176,55 @@ class CloudSyncSupervisor:
                     terminal_reason=traversal.terminal_reason,
                     snapshot_consistent=traversal.snapshot_consistent,
                 )
-            except BaseException:
+            except asyncio.CancelledError:
                 await self.repository.async_finish_discovery(
                     run_id,
                     complete=False,
-                    terminal_reason="interrupted",
+                    terminal_reason="cancelled",
+                )
+                raise
+            except CloudLinkChangedError:
+                await self.repository.async_finish_discovery(
+                    run_id,
+                    complete=False,
+                    terminal_reason="link_changed",
+                )
+                raise
+            except CloudAuthError:
+                await self.repository.async_finish_discovery(
+                    run_id,
+                    complete=False,
+                    terminal_reason="auth",
+                )
+                raise
+            except CloudPermissionError:
+                await self.repository.async_finish_discovery(
+                    run_id,
+                    complete=False,
+                    terminal_reason="permission",
+                )
+                raise
+            except CloudTransportError:
+                await self.repository.async_finish_discovery(
+                    run_id,
+                    complete=False,
+                    terminal_reason="transport",
+                )
+                self._discovery_error_category = "discovery_transport"
+                continue
+            except (CloudSchemaError, CloudBoundsError, CloudConflictError):
+                await self.repository.async_finish_discovery(
+                    run_id,
+                    complete=False,
+                    terminal_reason="schema",
+                )
+                self._discovery_error_category = "discovery_schema"
+                continue
+            except Exception:
+                await self.repository.async_finish_discovery(
+                    run_id,
+                    complete=False,
+                    terminal_reason="internal",
                 )
                 raise
 
@@ -319,7 +365,7 @@ class CloudSyncSupervisor:
 
             await self._refresh_queue_health()
             self.health.status = SyncStatus.IDLE
-            self.health.last_error_category = None
+            self.health.last_error_category = self._discovery_error_category
             self.health.last_success_us = utc_now_us()
             return processed
 
