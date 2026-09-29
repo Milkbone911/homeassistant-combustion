@@ -217,6 +217,67 @@ async def test_partial_index_failure_retains_validated_page_evidence(
 
 
 @pytest.mark.asyncio
+async def test_association_discovery_failure_does_not_gate_persisted_work(
+    tmp_path: Path, monkeypatch
+):
+    """A failed fresh probe list cannot block already-persisted sample work."""
+    database, repository = await _archive(tmp_path)
+    entry = _entry()
+    seed_client = _FakeCloudClient()
+    monkeypatch.setattr(
+        sync_module,
+        "create_linked_cloud_client",
+        lambda _hass, _entry: (seed_client, 1, "subject-a"),
+    )
+    seed = CloudSyncSupervisor(
+        MagicMock(),
+        entry,
+        repository,
+        CloudLinkHealth(),
+        SyncHealth(),
+    )
+
+    # Discover one session and process only its manifest, leaving sample work durable.
+    assert await seed.async_sync_cycle(
+        force_context_refresh=True,
+        max_work=1,
+    ) == 1
+    assert seed_client.meta_calls == 1
+    assert seed_client.sample_calls == 0
+
+    class FailingAssociationClient(_FakeCloudClient):
+        async def probes(self):
+            raise CloudTransportError("synthetic association discovery failure")
+
+    client = FailingAssociationClient()
+    monkeypatch.setattr(
+        sync_module,
+        "create_linked_cloud_client",
+        lambda _hass, _entry: (client, 1, "subject-a"),
+    )
+    supervisor = CloudSyncSupervisor(
+        MagicMock(),
+        entry,
+        repository,
+        CloudLinkHealth(),
+        SyncHealth(),
+    )
+
+    processed = await supervisor.async_sync_cycle(
+        force_context_refresh=True,
+        max_work=1,
+    )
+
+    assert processed == 1
+    assert client.sample_calls == 1
+    assert supervisor.health.last_error_category == "discovery_transport"
+    assert supervisor.cloud_health.status == "degraded"
+    counts = await repository.async_archive_counts()
+    assert counts["samples"] == 2
+    await database.async_stop()
+
+
+@pytest.mark.asyncio
 async def test_discovery_failure_on_one_probe_does_not_block_later_probe(
     tmp_path: Path, monkeypatch
 ):
