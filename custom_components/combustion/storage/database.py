@@ -227,6 +227,9 @@ class ArchiveDatabase:
         self._init_future: concurrent.futures.Future[ArchiveMetadata] | None = None
         self._shutdown_future: concurrent.futures.Future[None] | None = None
         self._reader_pool: concurrent.futures.ThreadPoolExecutor | None = None
+        self._reader_futures: set[asyncio.Future[Any]] = set()
+        self._reader_shutdown_started = False
+        self._shutdown_monitor_task: asyncio.Task[None] | None = None
         self._accepting = False
         self._owns_path = False
         self._stopped = False
@@ -241,6 +244,77 @@ class ArchiveDatabase:
     def accepting(self) -> bool:
         """Return whether new writer work is accepted."""
         return self._accepting
+
+    def _track_reader_future(
+        self,
+        future: asyncio.Future[Any],
+    ) -> asyncio.Future[Any]:
+        """Track executor work independently from the awaiting caller."""
+        self._reader_futures.add(future)
+        future.add_done_callback(self._reader_future_done)
+        return future
+
+    def _reader_future_done(self, future: asyncio.Future[Any]) -> None:
+        """Consume executor completion and allow eventual shutdown cleanup."""
+        self._reader_futures.discard(future)
+        with suppress(asyncio.CancelledError, Exception):
+            future.exception()
+
+    def _shutdown_error(self) -> BaseException | None:
+        future = self._shutdown_future
+        if future is None or not future.done():
+            return None
+        try:
+            future.result()
+        except BaseException as err:
+            return err
+        return None
+
+    def _finalize_quiescent_shutdown(self) -> bool:
+        """Release ownership only after writer and all reader work are gone."""
+        if self._stopped or not self._reader_shutdown_started:
+            return self._stopped
+        if self._reader_futures:
+            return False
+        thread = self._thread
+        if thread is not None and thread.is_alive():
+            return False
+        shutdown_future = self._shutdown_future
+        if shutdown_future is not None and not shutdown_future.done():
+            return False
+        if self._shutdown_error() is not None:
+            return False
+
+        self._thread = None
+        self._stopped = True
+        self._release_guard()
+        self.health.status = ArchiveStatus.STOPPED
+        self.health.error_category = None
+        self.health.writer_queue_depth = 0
+        return True
+
+    async def _async_monitor_incomplete_shutdown(self) -> None:
+        """Release a timeout fence later if all owned workers actually finish."""
+        try:
+            while not self._stopped:
+                if self._shutdown_error() is not None:
+                    return
+                if self._finalize_quiescent_shutdown():
+                    return
+                await asyncio.sleep(0.05)
+        finally:
+            self._shutdown_monitor_task = None
+
+    def _ensure_shutdown_monitor(self) -> None:
+        """Start one internal cleanup watcher after a bounded stop times out."""
+        task = self._shutdown_monitor_task
+        if task is not None and not task.done():
+            return
+        loop = asyncio.get_running_loop()
+        self._shutdown_monitor_task = loop.create_task(
+            self._async_monitor_incomplete_shutdown(),
+            name="combustion-archive-shutdown-monitor",
+        )
 
     def _acquire_guard(self) -> None:
         key = str(self.path)
@@ -305,6 +379,8 @@ class ArchiveDatabase:
             max_workers=self.reader_limit,
             thread_name_prefix="combustion-archive-reader",
         )
+        self._reader_futures.clear()
+        self._reader_shutdown_started = False
         self._accepting = True
         self.health.status = ArchiveStatus.READY
         self.health.schema_version = metadata.schema_version
@@ -549,10 +625,13 @@ class ArchiveDatabase:
 
     async def async_read(self, fn: _READ[_T]) -> _T:
         """Run a short read on one of at most two thread-confined connections."""
-        if self._reader_pool is None or self._stopped:
+        pool = self._reader_pool
+        if pool is None or self._stopped or not self._accepting:
             raise ArchiveError("Archive reader pool is unavailable")
         loop = asyncio.get_running_loop()
-        future = loop.run_in_executor(self._reader_pool, self._read_call, fn)
+        future = self._track_reader_future(
+            loop.run_in_executor(pool, self._read_call, fn)
+        )
         try:
             result = await asyncio.shield(future)
         except (sqlite3.Error, OSError):
@@ -722,12 +801,14 @@ class ArchiveDatabase:
 
     async def async_backup(self, destination: Path) -> dict[str, Any]:
         """Create a consistent, identity-complete archive recovery bundle."""
-        if self._reader_pool is None:
+        pool = self._reader_pool
+        if pool is None or self._stopped or not self._accepting:
             raise ArchiveError("Archive reader pool is unavailable")
         loop = asyncio.get_running_loop()
-        result = await asyncio.shield(
-            loop.run_in_executor(self._reader_pool, self._backup_sync, destination)
+        future = self._track_reader_future(
+            loop.run_in_executor(pool, self._backup_sync, destination)
         )
+        result = await asyncio.shield(future)
         self.health.last_backup_us = int(result["created_at_us"])
         await self.async_refresh_sizes()
         return result
@@ -839,49 +920,73 @@ class ArchiveDatabase:
         self.health.status = ArchiveStatus.STOPPING
 
     async def async_stop(self, *, timeout: float = 10.0) -> None:
-        """Stop accepting work, drain queued writes, checkpoint and close."""
+        """Bound total shutdown while retaining ownership until workers finish."""
+        if timeout < 0:
+            raise ValueError("timeout must be nonnegative")
         if self._stopped:
             return
-        self.stop_accepting()
-        thread = self._thread
-        if thread is not None:
-            self._commands.put(_STOP)
-            await asyncio.to_thread(thread.join, timeout)
-            if thread.is_alive():
-                self.health.status = ArchiveStatus.DEGRADED
-                self.health.error_category = "shutdown_incomplete"
-                raise ArchiveShutdownIncomplete(
-                    "Archive writer did not exit; ownership remains fenced"
-                )
-        self._thread = None
 
-        shutdown_error: BaseException | None = None
-        shutdown_future = self._shutdown_future
-        if shutdown_future is not None and shutdown_future.done():
-            try:
-                shutdown_future.result()
-            except BaseException as err:  # writer owns the durability boundary
-                shutdown_error = err
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        self.stop_accepting()
 
         pool = self._reader_pool
         self._reader_pool = None
-        if pool is not None:
-            await asyncio.to_thread(pool.shutdown, True)
+        if not self._reader_shutdown_started:
+            self._reader_shutdown_started = True
+            if pool is not None:
+                pool.shutdown(wait=False, cancel_futures=True)
 
+        thread = self._thread
+        if thread is not None and thread.is_alive():
+            self._commands.put(_STOP)
+            remaining = max(0.0, deadline - loop.time())
+            if remaining > 0:
+                try:
+                    await asyncio.wait_for(
+                        asyncio.to_thread(thread.join, remaining),
+                        timeout=remaining,
+                    )
+                except TimeoutError:
+                    pass
+            if thread.is_alive():
+                self.health.status = ArchiveStatus.DEGRADED
+                self.health.error_category = "shutdown_incomplete"
+                self._ensure_shutdown_monitor()
+                raise ArchiveShutdownIncomplete(
+                    "Archive workers exceeded shutdown timeout; "
+                    "ownership remains fenced"
+                )
+
+        shutdown_error = self._shutdown_error()
         if shutdown_error is not None:
-            # The worker is gone, but its final checkpoint/close did not
-            # complete cleanly. Retain the process-local ownership fence so a
-            # reload cannot silently reopen uncertain archive state.
             self.health.status = ArchiveStatus.DEGRADED
             self.health.error_category = "shutdown_incomplete"
             raise ArchiveShutdownIncomplete(
                 "Archive writer did not shut down cleanly; ownership remains fenced"
             ) from shutdown_error
 
-        self._stopped = True
-        self._release_guard()
-        self.health.status = ArchiveStatus.STOPPED
-        self.health.writer_queue_depth = 0
+        pending = {future for future in self._reader_futures if not future.done()}
+        remaining = max(0.0, deadline - loop.time())
+        if pending and remaining > 0:
+            _done, pending = await asyncio.wait(pending, timeout=remaining)
+
+        if pending:
+            self.health.status = ArchiveStatus.DEGRADED
+            self.health.error_category = "shutdown_incomplete"
+            self._ensure_shutdown_monitor()
+            raise ArchiveShutdownIncomplete(
+                "Archive workers exceeded shutdown timeout; "
+                "ownership remains fenced"
+            )
+
+        if not self._finalize_quiescent_shutdown():
+            self.health.status = ArchiveStatus.DEGRADED
+            self.health.error_category = "shutdown_incomplete"
+            self._ensure_shutdown_monitor()
+            raise ArchiveShutdownIncomplete(
+                "Archive shutdown is incomplete; ownership remains fenced"
+            )
 
     def discard_unstarted(self) -> None:
         """Release a guard after a failed start only when no worker survives."""
