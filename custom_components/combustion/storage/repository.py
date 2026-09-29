@@ -1271,12 +1271,22 @@ class ArchiveRepository:
                 for start, end in _contiguous(present):
                     _merge_coverage(conn, work.session_id, start, end)
 
-                missing = _subtract_coverage(
+                coverage_missing = _subtract_coverage(
                     work.start_seq,
                     work.end_seq,
                     _coverage_for(
                         conn, work.session_id, work.start_seq, work.end_seq
                     ),
+                )
+                response_missing = _subtract_coverage(
+                    work.start_seq,
+                    work.end_seq,
+                    _contiguous(sorted(unique_rows)),
+                )
+                missing = (
+                    response_missing
+                    if work.kind == "audit"
+                    else coverage_missing
                 )
                 conn.execute(
                     """
@@ -1293,9 +1303,10 @@ class ArchiveRepository:
                         work.end_seq,
                     ),
                 )
-                missing_rows = 0
-                for start, end in missing:
-                    missing_rows += end - start + 1
+                missing_rows = sum(
+                    end - start + 1 for start, end in missing
+                )
+                for start, end in coverage_missing:
                     try:
                         conn.execute(
                             """
@@ -1364,7 +1375,7 @@ class ArchiveRepository:
                         """
                         UPDATE sync_work
                         SET state=?,start_seq=?,end_seq=?,not_before_us=?,
-                            last_error='source_missing',updated_at_us=?
+                            last_error=?,updated_at_us=?
                         WHERE work_id=?
                         """,
                         (
@@ -1372,11 +1383,16 @@ class ArchiveRepository:
                             first,
                             repair_end,
                             now + MISSING_RETRY_US,
+                            (
+                                "audit_incomplete"
+                                if work.kind == "audit"
+                                else "source_missing"
+                            ),
                             now,
                             work.work_id,
                         ),
                     )
-                    if exhausted:
+                    if exhausted and work.kind != "audit":
                         conn.execute(
                             """
                             UPDATE gaps SET retry_state='failed',last_seen_us=?
