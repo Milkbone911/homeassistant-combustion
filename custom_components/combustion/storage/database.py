@@ -588,15 +588,42 @@ class ArchiveDatabase:
                 with suppress(sqlite3.Error):
                     conn.close()
 
+    def _writer_command_done(
+        self,
+        future: concurrent.futures.Future[Any],
+    ) -> None:
+        """Fence storage failures even when the async waiter was cancelled."""
+        if future.cancelled():
+            return
+        try:
+            error = future.exception()
+        except concurrent.futures.CancelledError:
+            return
+        if isinstance(error, (sqlite3.Error, OSError)):
+            self._accepting = False
+            self.health.status = ArchiveStatus.DEGRADED
+            self.health.error_category = "storage_write"
+
+    @staticmethod
+    def _consume_wrapped_future(future: asyncio.Future[Any]) -> None:
+        """Consume abandoned wrapped-future errors without changing await semantics."""
+        if future.cancelled():
+            return
+        with suppress(Exception):
+            future.exception()
+
     async def async_write(self, fn: _WRITE[_T]) -> _T:
         """Serialize one connection-affine operation on the writer thread."""
         if not self._accepting:
             raise ArchiveError("Archive is not accepting writer work")
         future: concurrent.futures.Future[_T] = concurrent.futures.Future()
+        future.add_done_callback(self._writer_command_done)
         self._commands.put(_Command(fn, future))
         self.health.writer_queue_depth = self._commands.qsize()
+        wrapped = asyncio.wrap_future(future)
+        wrapped.add_done_callback(self._consume_wrapped_future)
         try:
-            result = await asyncio.shield(asyncio.wrap_future(future))
+            result = await asyncio.shield(wrapped)
         except (sqlite3.Error, OSError):
             self._accepting = False
             self.health.status = ArchiveStatus.DEGRADED
