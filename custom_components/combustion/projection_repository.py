@@ -916,8 +916,20 @@ class ProjectionRepository:
                         (job_id,),
                     ).fetchone()[0]
                 )
+                active = int(
+                    conn.execute(
+                        """
+                        SELECT COUNT(*) FROM projection_rows
+                        WHERE projection_job_id=?
+                          AND state IN ('planned','submitting','queued')
+                        """,
+                        (job_id,),
+                    ).fetchone()[0]
+                )
                 state = (
-                    "confirmed"
+                    "running"
+                    if active
+                    else "confirmed"
                     if confirmed == total
                     else "partial"
                     if confirmed
@@ -935,7 +947,11 @@ class ProjectionRepository:
                         confirmed,
                         failed,
                         now,
-                        None if state == "confirmed" else "incomplete_confirmation",
+                        (
+                            None
+                            if state in ("running", "confirmed")
+                            else "incomplete_confirmation"
+                        ),
                         job_id,
                     ),
                 )
@@ -1015,7 +1031,17 @@ class ProjectionRepository:
                         (job_id,),
                     ).fetchone()[0]
                 )
-                state = "partial" if confirmed else "failed"
+                active = int(
+                    conn.execute(
+                        """
+                        SELECT COUNT(*) FROM projection_rows
+                        WHERE projection_job_id=?
+                          AND state IN ('planned','submitting','queued')
+                        """,
+                        (job_id,),
+                    ).fetchone()[0]
+                )
+                state = "running" if active else "partial" if confirmed else "failed"
                 conn.execute(
                     """
                     UPDATE projection_jobs
@@ -1023,7 +1049,14 @@ class ProjectionRepository:
                         updated_at_us=?,error_category=?
                     WHERE projection_job_id=?
                     """,
-                    (state, confirmed, failed, now, category[:64], job_id),
+                    (
+                        state,
+                        confirmed,
+                        failed,
+                        now,
+                        None if state == "running" else category[:64],
+                        job_id,
+                    ),
                 )
                 conn.execute("COMMIT")
             except BaseException:
