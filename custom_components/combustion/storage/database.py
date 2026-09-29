@@ -599,7 +599,7 @@ class ArchiveDatabase:
             error = future.exception()
         except concurrent.futures.CancelledError:
             return
-        if isinstance(error, (sqlite3.Error, OSError)):
+        if isinstance(error, sqlite3.Error | OSError):
             self._accepting = False
             self.health.status = ArchiveStatus.DEGRADED
             self.health.error_category = "storage_write"
@@ -622,8 +622,10 @@ class ArchiveDatabase:
         self.health.writer_queue_depth = self._commands.qsize()
         wrapped = asyncio.wrap_future(future)
         wrapped.add_done_callback(self._consume_wrapped_future)
+        protected = asyncio.shield(wrapped)
+        protected.add_done_callback(self._consume_wrapped_future)
         try:
-            result = await asyncio.shield(wrapped)
+            result = await protected
         except (sqlite3.Error, OSError):
             self._accepting = False
             self.health.status = ArchiveStatus.DEGRADED
