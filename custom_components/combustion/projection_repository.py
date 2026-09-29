@@ -1177,6 +1177,38 @@ class ProjectionRepository:
         assert job is not None
         return job
 
+    async def async_mark_job_partial(
+        self,
+        job_id: str,
+        *,
+        category: str,
+    ) -> ProjectionJob:
+        """Release a running owner without inventing row-level completion."""
+        now = utc_now_us()
+
+        def write(conn: sqlite3.Connection) -> None:
+            row = conn.execute(
+                "SELECT state FROM projection_jobs WHERE projection_job_id=?",
+                (job_id,),
+            ).fetchone()
+            if row is None:
+                raise ProjectionPlanError("Projection job not found")
+            if row[0] == "confirmed":
+                return
+            conn.execute(
+                """
+                UPDATE projection_jobs
+                SET state='partial',updated_at_us=?,error_category=?
+                WHERE projection_job_id=?
+                """,
+                (now, category[:64], job_id),
+            )
+
+        await self.database.async_write(write)
+        job = await self.async_get_job(job_id)
+        assert job is not None
+        return job
+
     async def async_recover_incomplete_jobs(self) -> int:
         """Mark abandoned running jobs partial without inventing completion."""
         now = utc_now_us()
