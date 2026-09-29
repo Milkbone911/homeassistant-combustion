@@ -34,7 +34,7 @@ from .storage.repository import (
 
 _LOGGER = LOGGER.getChild("local-capture")
 
-CAPTURE_POLICY_VERSION = 2
+CAPTURE_POLICY_VERSION = 3
 REGULAR_INTERVAL_SECONDS = 1.0
 MAX_QUEUE_ITEMS = 256
 WRITE_BATCH_SIZE = 50
@@ -107,6 +107,7 @@ class LocalCaptureSupervisor:
         ] = {}
         self._regular_timers: dict[tuple[str, str, str], asyncio.TimerHandle] = {}
         self._last_regular_emitted: dict[tuple[str, str, str], float] = {}
+        self._emission_clock: Callable[[], float] = self.hass.loop.time
         self._last_signature: dict[
             tuple[str, str, str], tuple[Any, ...]
         ] = {}
@@ -503,10 +504,10 @@ class LocalCaptureSupervisor:
         key: tuple[str, str, str],
         record: LocalObservationRecord,
     ) -> None:
-        now_mono = record.received_monotonic_ns / 1_000_000_000
+        emission_now = self._emission_clock()
         last = self._last_regular_emitted.get(key)
-        if last is None or now_mono - last >= REGULAR_INTERVAL_SECONDS:
-            self._last_regular_emitted[key] = now_mono
+        if last is None or emission_now - last >= REGULAR_INTERVAL_SECONDS:
+            self._last_regular_emitted[key] = emission_now
             self._enqueue(record)
             return
 
@@ -514,7 +515,10 @@ class LocalCaptureSupervisor:
             self.health.coalesced_observations += 1
         self._pending_regular[key] = record
         if key not in self._regular_timers:
-            delay = max(0.0, REGULAR_INTERVAL_SECONDS - (now_mono - last))
+            delay = max(
+                0.0,
+                REGULAR_INTERVAL_SECONDS - (emission_now - last),
+            )
             self._regular_timers[key] = self.hass.loop.call_later(
                 delay, self._flush_regular, key
             )
@@ -527,9 +531,7 @@ class LocalCaptureSupervisor:
         record = self._pending_regular.pop(key, None)
         if record is None:
             return
-        self._last_regular_emitted[key] = (
-            record.received_monotonic_ns / 1_000_000_000
-        )
+        self._last_regular_emitted[key] = self._emission_clock()
         self._enqueue(record)
 
     def _enqueue(self, record: LocalObservationRecord) -> None:
