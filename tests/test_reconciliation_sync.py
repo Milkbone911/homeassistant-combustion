@@ -190,11 +190,10 @@ async def test_partial_index_failure_retains_validated_page_evidence(
         SyncHealth(),
     )
 
-    with pytest.raises(CloudTransportError):
-        await supervisor.async_sync_cycle(
-            force_context_refresh=True,
-            max_work=1,
-        )
+    processed = await supervisor.async_sync_cycle(
+        force_context_refresh=True,
+        max_work=1,
+    )
 
     evidence = await database.async_read(
         lambda conn: (
@@ -203,9 +202,101 @@ async def test_partial_index_failure_retains_validated_page_evidence(
             ).fetchone()[0],
             conn.execute("SELECT COUNT(*) FROM discovery_pages").fetchone()[0],
             conn.execute("SELECT COUNT(*) FROM cloud_sessions").fetchone()[0],
+            conn.execute("SELECT COUNT(*) FROM session_manifests").fetchone()[0],
         )
     )
-    assert evidence == ("partial", 1, 1)
+    assert processed == 1
+    assert client.meta_calls == 1
+    assert supervisor.health.last_error_category == "discovery_transport"
+    assert evidence == ("partial", 1, 1, 1)
+    await database.async_stop()
+
+
+@pytest.mark.asyncio
+async def test_discovery_failure_on_one_probe_does_not_block_later_probe(
+    tmp_path: Path, monkeypatch
+):
+    """A per-device discovery failure cannot monopolize the account cycle."""
+
+    class TwoProbeClient(_FakeCloudClient):
+        async def probes(self):
+            return (
+                Probe("probe-a", "provider-a"),
+                Probe("probe-b", "provider-b"),
+            )
+
+        async def sessions(self, probe, *, page_observer=None, **_kwargs):
+            self.sessions_calls += 1
+            if probe.serial == "probe-a":
+                raise CloudTransportError("synthetic probe-a discovery failure")
+            session = SessionIndex(
+                source_session_token="456",
+                index_id="index-b",
+                serial="probe-b",
+                uid=None,
+                device_type=1,
+                sample_period_ms=5000,
+                started_at="2026-01-01T00:00:00Z",
+                ended_at=None,
+                advertised_ranges=((0, 1),),
+                raw={
+                    "device_session_id": 456,
+                    "sample_period": 5000,
+                    "sequence_number_ranges": [[0, 1]],
+                },
+            )
+            page = IndexPage(1, 1, 1, (session,))
+            if page_observer is not None:
+                await page_observer(page, "digest-b")
+            return IndexTraversal(
+                sessions=page.sessions,
+                pages=(page,),
+                page_digests=("digest-b",),
+                terminal_reason="declared_total_pages",
+            )
+
+    database, repository = await _archive(tmp_path)
+    client = TwoProbeClient()
+    entry = _entry()
+    monkeypatch.setattr(
+        sync_module,
+        "create_linked_cloud_client",
+        lambda _hass, _entry: (client, 1, "subject-a"),
+    )
+    supervisor = CloudSyncSupervisor(
+        MagicMock(),
+        entry,
+        repository,
+        CloudLinkHealth(),
+        SyncHealth(),
+    )
+
+    processed = await supervisor.async_sync_cycle(
+        force_context_refresh=True,
+        max_work=1,
+    )
+
+    evidence = await database.async_read(
+        lambda conn: (
+            conn.execute(
+                """
+                SELECT terminal_status,terminal_reason
+                FROM discovery_runs
+                ORDER BY started_at_us,run_id
+                """
+            ).fetchall(),
+            conn.execute("SELECT COUNT(*) FROM session_manifests").fetchone()[0],
+        )
+    )
+    assert processed == 1
+    assert client.sessions_calls == 2
+    assert client.meta_calls == 1
+    assert sorted(evidence[0]) == [
+        ("complete", "declared_total_pages"),
+        ("partial", "transport"),
+    ]
+    assert evidence[1] == 1
+    assert supervisor.health.last_error_category == "discovery_transport"
     await database.async_stop()
 
 
