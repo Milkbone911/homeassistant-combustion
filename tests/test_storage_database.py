@@ -375,6 +375,44 @@ async def test_cancelled_await_does_not_claim_disk_work_stopped(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_cancelled_write_waiter_cannot_hide_storage_failure(tmp_path: Path):
+    """Writer-owned failure fencing survives cancellation of the async caller."""
+    path = tmp_path / "archive.sqlite3"
+    db = ArchiveDatabase(path, require_qualified_wal=False)
+    await db.async_start(allow_create=True)
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def failing_write(_conn: sqlite3.Connection) -> None:
+        started.set()
+        assert release.wait(5)
+        raise sqlite3.OperationalError("synthetic disk failure")
+
+    task = asyncio.create_task(db.async_write(failing_write))
+    assert await asyncio.to_thread(started.wait, 2)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    release.set()
+    for _ in range(100):
+        if db.health.error_category == "storage_write":
+            break
+        await asyncio.sleep(0.01)
+    else:
+        pytest.fail("writer-owned storage failure was not published")
+
+    assert db.health.status is ArchiveStatus.DEGRADED
+    assert db.accepting is False
+    with pytest.raises(ArchiveError, match="not accepting"):
+        await db.async_write(lambda conn: conn.execute("SELECT 1"))
+
+    await db.async_stop()
+
+
+@pytest.mark.asyncio
 async def test_shutdown_timeout_includes_running_reader_and_eventual_cleanup(
     tmp_path: Path,
 ):
