@@ -41,6 +41,7 @@ class StatisticsProjectionStatus(StrEnum):
     RUNNING = "running"
     READY = "ready"
     PARTIAL = "partial"
+    CANCELLED = "cancelled"
     DEGRADED = "degraded"
 
 
@@ -239,7 +240,7 @@ def _apply_health(
     job: ProjectionJob,
 ) -> None:
     health.active_job_id = (
-        job.projection_job_id if job.state in ("planned", "running", "partial") else None
+        job.projection_job_id if job.state in ("planned", "running") else None
     )
     health.planned_rows = job.planned_rows
     health.queued_rows = job.queued_rows
@@ -256,6 +257,8 @@ def _apply_health(
         if job.state == "running"
         else StatisticsProjectionStatus.PARTIAL
         if job.state == "partial"
+        else StatisticsProjectionStatus.CANCELLED
+        if job.state == "cancelled"
         else StatisticsProjectionStatus.DEGRADED
     )
 
