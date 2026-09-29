@@ -21,6 +21,7 @@ from .local_capture import (
 )
 from .prediction_manager import PredictionManager
 from .probe_manager import ProbeManager
+from .projection_repository import ProjectionRepository
 from .reconciliation.sync import CloudSyncSupervisor, SyncHealth
 from .source_link import SourceLinkRepository
 from .statistics_projection import StatisticsProjectionHealth
@@ -71,6 +72,8 @@ class CombustionRuntime:
     archive_database: ArchiveDatabase | None = field(default=None, repr=False)
     archive_repository: ArchiveRepository | None = field(default=None, repr=False)
     source_link_repository: SourceLinkRepository | None = field(default=None, repr=False)
+    projection_repository: ProjectionRepository | None = field(default=None, repr=False)
+    projection_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
     sync_supervisor: CloudSyncSupervisor | None = field(default=None, repr=False)
     local_capture_supervisor: LocalCaptureSupervisor | None = field(
         default=None, repr=False
