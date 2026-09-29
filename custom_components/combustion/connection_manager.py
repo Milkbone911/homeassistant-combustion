@@ -127,7 +127,10 @@ class ConnectionManager:
 
     def _notify_conn_listeners(self) -> None:
         for listener in list(self._conn_listeners):
-            listener()
+            try:
+                listener()
+            except Exception:  # noqa: BLE001 - consumers are isolated
+                _LOGGER.debug("Connection listener failed", exc_info=True)
 
     @callback
     def _connectable_advertisement(self, service_info, change) -> None:
@@ -233,7 +236,10 @@ class ConnectionManager:
             pd = self._probe_data.get(serial)
             if pd is not None:
                 for cb in list(self._new_probe_listeners):
-                    cb(pd)
+                    try:
+                        cb(pd)
+                    except Exception:  # noqa: BLE001 - consumers are isolated
+                        _LOGGER.debug("New-probe listener failed", exc_info=True)
 
     def _on_disconnected(self, serial: str) -> None:
         """Drop the live client and notify listeners."""
