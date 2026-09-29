@@ -419,6 +419,7 @@ CREATE TABLE projection_jobs (
     queued_rows INTEGER NOT NULL DEFAULT 0 CHECK (queued_rows >= 0),
     confirmed_rows INTEGER NOT NULL DEFAULT 0 CHECK (confirmed_rows >= 0),
     failed_rows INTEGER NOT NULL DEFAULT 0 CHECK (failed_rows >= 0),
+    plan_summary_json TEXT NOT NULL,
     created_at_us INTEGER NOT NULL,
     updated_at_us INTEGER NOT NULL,
     error_category TEXT,
