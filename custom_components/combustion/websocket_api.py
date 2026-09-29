@@ -18,7 +18,6 @@ from homeassistant.core import HomeAssistant, callback
 from .const import DOMAIN
 from .reconciliation.sync import MAX_WORK_PER_CYCLE
 from .source_link import SourceLinkRepository
-from .statistics_projection import async_project_missing_statistics
 from .storage.database import ArchiveStatus
 
 WS_STATUS = "combustion/archive/status"
@@ -370,40 +369,9 @@ async def websocket_archive_project_statistics(
     connection: websocket_api.ActiveConnection,
     msg: dict[str, Any],
 ) -> None:
-    """Queue fill-only cloud-history statistics for exact-linked probes."""
-    runtime = _runtime(hass)
-    if runtime is None:
-        connection.send_error(msg["id"], ERR_NOT_FOUND, "Combustion entry is not loaded")
-        return
-    try:
-        repository, counts = await _reconcile_source_links(runtime)
-        if counts["ambiguous_cloud_sources"]:
-            connection.send_error(
-                msg["id"],
-                ERR_NOT_SUPPORTED,
-                "Source identity is ambiguous; statistics projection refused",
-            )
-            return
-        await async_project_missing_statistics(
-            hass,
-            repository,
-            runtime.statistics_projection_health,
-        )
-    except Exception:  # noqa: BLE001
-        connection.send_error(
-            msg["id"], ERR_UNKNOWN_ERROR, "Statistics projection failed"
-        )
-        return
-
-    health = runtime.statistics_projection_health
-    connection.send_result(
+    """Refuse Recorder mutation until the S5 projection hardening gate passes."""
+    connection.send_error(
         msg["id"],
-        {
-            "status": health.status,
-            "linked_sources": health.linked_sources,
-            "resolved_entities": health.resolved_entities,
-            "queued_hours": health.queued_hours,
-            "skipped_existing_hours": health.skipped_existing_hours,
-            "last_run_us": health.last_run_us,
-        },
+        ERR_NOT_SUPPORTED,
+        "Statistics projection is disabled pending S5 hardening",
     )
