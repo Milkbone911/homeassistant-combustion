@@ -30,7 +30,7 @@ from .const import DEVICE_NAME, DOMAIN, LOGGER
 _LOGGER = LOGGER.getChild('sensor')
 
 # Device names shown on the HA device page, keyed by advertisement device type.
-DEVICE_NAMES = {'GAUGE': 'Grill Gauge', 'BOOSTER': 'Booster', 'DISPLAY': 'Display'}
+DEVICE_NAMES = {'GAUGE': 'Grill Gauge', 'BOOSTER': 'Booster', 'DISPLAY': 'Display', 'ENGINE': 'Engine'}
 
 VIRTUAL_TEMPERATURE_SENSOR_DESCRIPTION = SensorEntityDescription(
     key=f"{SensorDeviceClass.TEMPERATURE}_{UnitOfTemperature.CELSIUS}",
@@ -86,6 +86,14 @@ def _create_gauge_sensors(probe_manager: ProbeManager, gauge_data):
 
     return sensors
 
+def _create_engine_sensors(probe_manager: ProbeManager, engine_data):
+    sensors: list[CombustionEntity] = [
+        CombustionEngineSetPointSensor(probe_manager, engine_data),
+        CombustionRSSISensor(probe_manager, engine_data),
+    ]
+
+    return sensors
+
 def _create_prediction_sensors(prediction_manager, serial: str):
     sensors: list[CombustionEntity] = [
         CombustionPredictionStateSensor(prediction_manager, serial),
@@ -103,6 +111,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     def _create_sensors_callback(pm: ProbeManager, device_data):
         if device_data.device_type == 'GAUGE':
             sensors = _create_gauge_sensors(pm, device_data)
+        elif device_data.device_type == 'ENGINE':
+            sensors = _create_engine_sensors(pm, device_data)
         elif device_data.device_type in ('BOOSTER', 'DISPLAY'):
             sensors = [CombustionRSSISensor(pm, device_data)]
         else:
@@ -153,6 +163,42 @@ class CombustionGaugeTemperatureSensor(CombustionEntity, SensorEntity):
             return self.probe_manager.probe_data(self.device_serial_number).temperature
         except Exception as ex:
             _LOGGER.debug("Error getting gauge temperature for native_value: %s", ex)
+            return None
+
+class CombustionEngineSetPointSensor(CombustionEntity, SensorEntity):
+    """Target temperature of a Combustion Engine."""
+
+    def __init__(self, probe_manager: ProbeManager, engine_data) -> None:
+        """Initialize."""
+        super().__init__(engine_data.serial_number, device_name='Engine')
+        self.device_serial_number = engine_data.serial_number
+        self.probe_manager = probe_manager
+        self._attr_has_entity_name = True
+        self._attr_unique_id = f'{engine_data.serial_number}--engine-set-point'
+        self.entity_description = VIRTUAL_TEMPERATURE_SENSOR_DESCRIPTION
+
+    @property
+    def should_poll(self) -> bool:
+        """Do not poll for updates."""
+        return False
+
+    @property
+    def name(self):
+        """Sensor name."""
+        return 'Set point'
+
+    @callback
+    def on_update(self):
+        """Process engine updates."""
+        self.async_write_ha_state()
+
+    @property
+    def native_value(self) -> float | None:
+        """Return the engine's target temperature, or None when none is set."""
+        try:
+            return self.probe_manager.probe_data(self.device_serial_number).set_point
+        except Exception as ex:
+            _LOGGER.debug("Error getting engine set point for native_value: %s", ex)
             return None
 
 GAUGE_ZONE_SENSOR_DESCRIPTION = SensorEntityDescription(
@@ -262,7 +308,7 @@ class CombustionRSSISensor(CombustionEntity, SensorEntity):
         self._attr_unique_id = f'{probe_data.serial_number}--rssi'
         self.entity_description = RSSI_SENSOR_DESCRIPTION
         # A repeater's only real self-data is its signal, so surface it.
-        if probe_data.device_type in ('BOOSTER', 'DISPLAY'):
+        if probe_data.device_type in ('BOOSTER', 'DISPLAY', 'ENGINE'):
             self._attr_entity_registry_enabled_default = True
 
     @property

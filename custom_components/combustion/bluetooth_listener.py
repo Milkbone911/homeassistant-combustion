@@ -16,6 +16,7 @@ from custom_components.combustion.combustion_ble.advertising_data import (
 from custom_components.combustion.combustion_ble.combustion_probe_data import (
     CombustionProbeData,
 )
+from custom_components.combustion.combustion_ble.engine_data import CombustionEngineData
 from custom_components.combustion.combustion_ble.gauge_data import CombustionGaugeData
 from custom_components.combustion.combustion_ble.node_data import NodeData
 from custom_components.combustion.const import BT_MANUFACTURER_ID, LOGGER
@@ -79,7 +80,14 @@ def parse_advertisement(service_info: BluetoothServiceInfoBleak):
             return None
         return node_data
 
-    # Engines and unknown future products aren't handled yet.
+    if product_type == CombustionProductType.ENGINE:
+        engine_data = CombustionEngineData.from_advertisement(service_info)
+        if engine_data is None or not engine_data.valid:
+            _LOGGER.debug("Discarding invalid engine advertisement from [%s]", service_info.address)
+            return None
+        return engine_data
+
+    # Unknown future products aren't handled yet.
     _LOGGER.debug("Ignoring %s advertisement from [%s]", product_type.name, service_info.address)
     return None
 

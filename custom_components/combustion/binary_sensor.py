@@ -49,7 +49,31 @@ GAUGE_LOW_ALARM_DESCRIPTION = BinarySensorEntityDescription(
 )
 
 
-NODE_DEVICE_NAMES = {'BOOSTER': 'Booster', 'DISPLAY': 'Display'}
+NODE_DEVICE_NAMES = {'BOOSTER': 'Booster', 'DISPLAY': 'Display', 'ENGINE': 'Engine'}
+
+ENGINE_DEVICE_NAME = 'Engine'
+
+# (description, CombustionEngineData attribute) for each Engine status flag.
+ENGINE_FLAG_SENSORS = (
+    (BinarySensorEntityDescription(
+        key="engine_lid_open",
+        name="Lid",
+        device_class=BinarySensorDeviceClass.OPENING,
+    ), 'lid_open'),
+    (BinarySensorEntityDescription(
+        key="engine_control_device_connected",
+        name="Control device connected",
+        device_class=BinarySensorDeviceClass.CONNECTIVITY,
+    ), 'control_device_connected'),
+    (BinarySensorEntityDescription(
+        key="engine_app_mode",
+        name="App mode",
+    ), 'app_mode'),
+    (BinarySensorEntityDescription(
+        key="engine_fixed_speed",
+        name="Fixed fan speed",
+    ), 'fixed_speed'),
+)
 
 HIGH_RADIO_POWER_DESCRIPTION = BinarySensorEntityDescription(
     key="high_radio_power",
@@ -66,6 +90,13 @@ def _create_binary_sensors(probe_manager: ProbeManager, device_data):
             CombustionGaugeOverheatingSensor(probe_manager, device_data),
             CombustionGaugeAlarmSensor(probe_manager, device_data, 'high'),
             CombustionGaugeAlarmSensor(probe_manager, device_data, 'low'),
+        ]
+
+    if device_data.device_type == 'ENGINE':
+        return [
+            *(CombustionEngineFlagSensor(probe_manager, device_data, description, attribute)
+              for description, attribute in ENGINE_FLAG_SENSORS),
+            CombustionHighRadioPowerSensor(probe_manager, device_data),
         ]
 
     if device_data.device_type in ('BOOSTER', 'DISPLAY'):
@@ -251,6 +282,28 @@ class CombustionGaugeAlarmSensor(BaseCombustionBinarySensor):
             'tripped': alarm.tripped,
             'alarm_temperature': round(alarm.temperature, 1) if alarm.is_set else None,
         }
+
+
+class CombustionEngineFlagSensor(BaseCombustionBinarySensor):
+    """One status flag from a Combustion Engine advertisement."""
+
+    def __init__(self, probe_manager: ProbeManager, device_data, description, attribute: str) -> None:
+        """Initialize."""
+        super().__init__(probe_manager, device_data, device_name=ENGINE_DEVICE_NAME)
+        self._attribute = attribute
+        self._attr_unique_id = f'{device_data.serial_number}--{description.key}'
+        self.entity_description = description
+
+    @property
+    def name(self):
+        """Sensor name."""
+        return self.entity_description.name
+
+    @property
+    def is_on(self) -> bool | None:
+        """Return the flag's current value."""
+        data = self._device_data()
+        return None if data is None else getattr(data, self._attribute)
 
 
 class CombustionHighRadioPowerSensor(BaseCombustionBinarySensor):

@@ -19,8 +19,8 @@ Integrate [Combustion](https://combustion.inc) predictive probes and gauges into
 
 Platform | Description
 -- | --
-`binary_sensor` | Battery and overheating (probes), sensor-connected and high/low alarm status (gauges), high-radio-power (repeaters).
-`sensor` | Temperature data from probes and gauges on your Meatnet, the gauge cooking zone, plus diagnostics (mode, RSSI). Boosters and Displays appear as their own devices with signal strength and radio power.
+`binary_sensor` | Battery and overheating (probes), sensor-connected and high/low alarm status (gauges), high-radio-power (repeaters), and lid, app mode, control-device-connected and fixed-fan-speed status (Engines).
+`sensor` | Temperature data from probes and gauges on your Meatnet, the gauge cooking zone, plus diagnostics (mode, RSSI). Boosters and Displays appear as their own devices with signal strength and radio power; Engines add their temperature set point.
 
 ## What's different in this fork
 
@@ -35,6 +35,7 @@ Fixes:
 New features:
 
 - **Giant Grill Gauge support**: temperature, cooking zone (SMOKE…INSANE), sensor-connected, overheating, low-battery and high/low alarm entities.
+- **Engine support**: the Engine appears as its own device with its temperature set point, signal strength, and lid-open, app-mode, control-device-connected, fixed-fan-speed and high-radio-power entities, read from its advertisements.
 - **Repeater devices**: Boosters and Displays appear as their own Home Assistant devices, exposing the signal strength (RSSI) and high-radio-power state they advertise.
 - **Bundled dashboard card** styled after the Combustion hardware — probes render as the square WiFi Display, the Grill Gauge as its round dial. See [Dashboard card](#dashboard-card).
 - **Instant Read temperature sensor** — quick-read temperatures now reach Home Assistant.
@@ -125,7 +126,7 @@ secondary: 10007dc0     # optional — show a food probe below the grill temp;
 
 ## Supported devices
 
-This integration supports reading temperature and battery data from Combustion's [Predictive Thermometer](https://combustion.inc/products/predictive-thermometer) and temperature, alarm and status data from the Giant Grill Gauge.
+This integration supports reading temperature and battery data from Combustion's [Predictive Thermometer](https://combustion.inc/products/predictive-thermometer) and temperature, alarm and status data from the Giant Grill Gauge, and set point and status data from the Engine. Engine fan, controller and battery details are only sent over a direct connection and aren't read yet.
 
 This integration can read data from a probe directly, or via a Meatnet repeater such as the [Range-Extending Booster](https://combustion.inc/products/long-range-predictive-thermometer) or [Range-Extending Display](https://combustion.inc/products/range-extending-display). Advertisements received through Home Assistant Bluetooth proxies (active or passive) are supported.
 
