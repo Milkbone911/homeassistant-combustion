@@ -49,7 +49,31 @@ GAUGE_LOW_ALARM_DESCRIPTION = BinarySensorEntityDescription(
 )
 
 
-NODE_DEVICE_NAMES = {'BOOSTER': 'Booster', 'DISPLAY': 'Display'}
+NODE_DEVICE_NAMES = {'BOOSTER': 'Booster', 'DISPLAY': 'Display', 'ENGINE': 'Engine'}
+
+ENGINE_DEVICE_NAME = 'Engine'
+
+# (description, CombustionEngineData attribute) for each Engine status flag.
+ENGINE_FLAG_SENSORS = (
+    (BinarySensorEntityDescription(
+        key="engine_lid_open",
+        name="Lid",
+        device_class=BinarySensorDeviceClass.OPENING,
+    ), 'lid_open'),
+    (BinarySensorEntityDescription(
+        key="engine_control_device_connected",
+        name="Control device connected",
+        device_class=BinarySensorDeviceClass.CONNECTIVITY,
+    ), 'control_device_connected'),
+    (BinarySensorEntityDescription(
+        key="engine_app_mode",
+        name="App mode",
+    ), 'app_mode'),
+    (BinarySensorEntityDescription(
+        key="engine_fixed_speed",
+        name="Fixed fan speed",
+    ), 'fixed_speed'),
+)
 
 HIGH_RADIO_POWER_DESCRIPTION = BinarySensorEntityDescription(
     key="high_radio_power",
@@ -66,6 +90,13 @@ def _create_binary_sensors(probe_manager: ProbeManager, device_data):
             CombustionGaugeOverheatingSensor(probe_manager, device_data),
             CombustionGaugeAlarmSensor(probe_manager, device_data, 'high'),
             CombustionGaugeAlarmSensor(probe_manager, device_data, 'low'),
+        ]
+
+    if device_data.device_type == 'ENGINE':
+        return [
+            *(CombustionEngineFlagSensor(probe_manager, device_data, description, attribute)
+              for description, attribute in ENGINE_FLAG_SENSORS),
+            CombustionHighRadioPowerSensor(probe_manager, device_data),
         ]
 
     if device_data.device_type in ('BOOSTER', 'DISPLAY'):
@@ -87,6 +118,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
 
     probe_manager: ProbeManager = hass.data[DOMAIN]
     probe_manager.init_binary_sensor_platform(_create_sensors_callback)
+
+    engine_connection = hass.data.get(f"{DOMAIN}_engine_connection")
+    if engine_connection is not None and engine_connection.enabled:
+        engine_connection.add_new_engine_listener(
+            lambda status: async_add_entities([
+                CombustionEngineStatusBinarySensor(engine_connection, status.serial_number, description, attribute)
+                for description, attribute in ENGINE_STATUS_BINARY_SENSORS
+            ])
+        )
 
     if getattr(probe_manager, "active_enabled", False):
         conn = probe_manager.connection_manager
@@ -251,6 +291,75 @@ class CombustionGaugeAlarmSensor(BaseCombustionBinarySensor):
             'tripped': alarm.tripped,
             'alarm_temperature': round(alarm.temperature, 1) if alarm.is_set else None,
         }
+
+
+class CombustionEngineFlagSensor(BaseCombustionBinarySensor):
+    """One status flag from a Combustion Engine advertisement."""
+
+    def __init__(self, probe_manager: ProbeManager, device_data, description, attribute: str) -> None:
+        """Initialize."""
+        super().__init__(probe_manager, device_data, device_name=ENGINE_DEVICE_NAME)
+        self._attribute = attribute
+        self._attr_unique_id = f'{device_data.serial_number}--{description.key}'
+        self.entity_description = description
+
+    @property
+    def name(self):
+        """Sensor name."""
+        return self.entity_description.name
+
+    @property
+    def is_on(self) -> bool | None:
+        """Return the flag's current value."""
+        data = self._device_data()
+        return None if data is None else getattr(data, self._attribute)
+
+
+ENGINE_STATUS_BINARY_SENSORS = (
+    (BinarySensorEntityDescription(
+        key="engine_reached_set_point",
+        name="Reached set point",
+    ), 'reached_set_point'),
+    (BinarySensorEntityDescription(
+        key="engine_maintenance_mode",
+        name="Maintenance mode",
+        entity_category=EntityCategory.DIAGNOSTIC,
+    ), 'maintenance_mode'),
+)
+
+
+class CombustionEngineStatusBinarySensor(CombustionEntity, BinarySensorEntity):
+    """One flag from the Engine Status message, available while connected."""
+
+    def __init__(self, engine_connection, serial: str, description, attribute: str) -> None:
+        """Initialize."""
+        super().__init__(serial, device_name=ENGINE_DEVICE_NAME)
+        self._engine_connection = engine_connection
+        self.device_serial_number = serial
+        self._attribute = attribute
+        self._attr_has_entity_name = True
+        self._attr_unique_id = f'{serial}--{description.key}'
+        self.entity_description = description
+
+    @property
+    def name(self):
+        """Sensor name."""
+        return self.entity_description.name
+
+    @property
+    def available(self) -> bool:
+        """Available while the Engine is connected and reporting."""
+        return self._engine_connection.status(self.device_serial_number) is not None
+
+    async def async_added_to_hass(self) -> None:
+        """Follow the Engine connection rather than advertisements."""
+        self.async_on_remove(self._engine_connection.add_listener(self.async_write_ha_state))
+
+    @property
+    def is_on(self) -> bool | None:
+        """Return the flag's current value."""
+        status = self._engine_connection.status(self.device_serial_number)
+        return None if status is None else getattr(status, self._attribute)
 
 
 class CombustionHighRadioPowerSensor(BaseCombustionBinarySensor):

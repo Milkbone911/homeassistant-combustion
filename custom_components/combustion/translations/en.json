@@ -80,6 +80,7 @@
                     "availability_timeout": "Seconds without advertisements before entities become unavailable",
                     "update_throttle": "Minimum seconds between sensor updates per device",
                     "enable_active_connection": "Active connection: predictions + control (requires a connectable Bluetooth proxy or adapter)",
+                    "enable_engine_connection": "Engine connection: fan, controller and battery data from Engines (requires a connectable Bluetooth proxy or adapter; never connects to probes)",
                     "history_enabled": "Historical archive (creates/opens the local Combustion archive)",
                     "cloud_sync_enabled": "Cloud history synchronization (requires Historical archive)"
                 }

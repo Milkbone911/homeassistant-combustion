@@ -12,8 +12,11 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
+    DEGREE,
+    PERCENTAGE,
     SIGNAL_STRENGTH_DECIBELS_MILLIWATT,
     EntityCategory,
+    UnitOfElectricPotential,
     UnitOfTemperature,
 )
 from homeassistant.core import HomeAssistant, callback
@@ -21,6 +24,13 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from custom_components.combustion.combustion_ble.combustion_probe_data import (
     CombustionProbeData,
+)
+from custom_components.combustion.combustion_ble.engine_status import (
+    BATTERY_LEVELS,
+    BATTERY_STATES,
+    CHARGING_FAULTS,
+    CONTROLLER_STATES,
+    FAN_STATES,
 )
 from custom_components.combustion.entity import CombustionEntity
 from custom_components.combustion.probe_manager import ProbeManager
@@ -30,7 +40,7 @@ from .const import DEVICE_NAME, DOMAIN, LOGGER
 _LOGGER = LOGGER.getChild('sensor')
 
 # Device names shown on the HA device page, keyed by advertisement device type.
-DEVICE_NAMES = {'GAUGE': 'Grill Gauge', 'BOOSTER': 'Booster', 'DISPLAY': 'Display'}
+DEVICE_NAMES = {'GAUGE': 'Grill Gauge', 'BOOSTER': 'Booster', 'DISPLAY': 'Display', 'ENGINE': 'Engine'}
 
 VIRTUAL_TEMPERATURE_SENSOR_DESCRIPTION = SensorEntityDescription(
     key=f"{SensorDeviceClass.TEMPERATURE}_{UnitOfTemperature.CELSIUS}",
@@ -86,6 +96,14 @@ def _create_gauge_sensors(probe_manager: ProbeManager, gauge_data):
 
     return sensors
 
+def _create_engine_sensors(probe_manager: ProbeManager, engine_data):
+    sensors: list[CombustionEntity] = [
+        CombustionEngineSetPointSensor(probe_manager, engine_data),
+        CombustionRSSISensor(probe_manager, engine_data),
+    ]
+
+    return sensors
+
 def _create_prediction_sensors(prediction_manager, serial: str):
     sensors: list[CombustionEntity] = [
         CombustionPredictionStateSensor(prediction_manager, serial),
@@ -103,6 +121,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     def _create_sensors_callback(pm: ProbeManager, device_data):
         if device_data.device_type == 'GAUGE':
             sensors = _create_gauge_sensors(pm, device_data)
+        elif device_data.device_type == 'ENGINE':
+            sensors = _create_engine_sensors(pm, device_data)
         elif device_data.device_type in ('BOOSTER', 'DISPLAY'):
             sensors = [CombustionRSSISensor(pm, device_data)]
         else:
@@ -118,6 +138,151 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
         def _create_prediction_callback(prm, serial):
             async_add_entities(_create_prediction_sensors(prm, serial))
         prediction_manager.init_sensor_platform(_create_prediction_callback)
+
+    engine_connection = hass.data.get(f"{DOMAIN}_engine_connection")
+    if engine_connection is not None and engine_connection.enabled:
+        engine_connection.add_new_engine_listener(
+            lambda status: async_add_entities([
+                CombustionEngineStatusSensor(engine_connection, status.serial_number, description, attribute)
+                for description, attribute in ENGINE_STATUS_SENSORS
+            ])
+        )
+
+# (description, EngineStatus attribute) for each value read over the Engine connection.
+ENGINE_STATUS_SENSORS = (
+    (SensorEntityDescription(
+        key="engine_fan_state",
+        name="Fan state",
+        device_class=SensorDeviceClass.ENUM,
+        options=list(FAN_STATES.values()),
+    ), 'fan_state'),
+    (SensorEntityDescription(
+        key="engine_fan_duty_cycle",
+        name="Fan duty cycle",
+        native_unit_of_measurement=PERCENTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
+    ), 'fan_duty_cycle'),
+    (SensorEntityDescription(
+        key="engine_fan_speed",
+        name="Fan speed",
+        native_unit_of_measurement=PERCENTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
+    ), 'fan_measured_speed'),
+    (SensorEntityDescription(
+        key="engine_fan_commanded_speed",
+        name="Fan commanded speed",
+        native_unit_of_measurement=PERCENTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_registry_enabled_default=False,
+    ), 'fan_commanded_speed'),
+    (SensorEntityDescription(
+        key="engine_controller_state",
+        name="Controller state",
+        device_class=SensorDeviceClass.ENUM,
+        options=list(CONTROLLER_STATES.values()),
+    ), 'controller_state'),
+    (SensorEntityDescription(
+        key="engine_control_temperature",
+        name="Control temperature",
+        device_class=SensorDeviceClass.TEMPERATURE,
+        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=1,
+    ), 'control_temperature'),
+    (SensorEntityDescription(
+        key="engine_smoothed_temperature",
+        name="Smoothed temperature",
+        device_class=SensorDeviceClass.TEMPERATURE,
+        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=1,
+        entity_registry_enabled_default=False,
+    ), 'smoothed_temperature'),
+    (SensorEntityDescription(
+        key="engine_battery_voltage",
+        name="Battery voltage",
+        device_class=SensorDeviceClass.VOLTAGE,
+        native_unit_of_measurement=UnitOfElectricPotential.VOLT,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=1,
+        entity_category=EntityCategory.DIAGNOSTIC,
+    ), 'battery_voltage'),
+    (SensorEntityDescription(
+        key="engine_battery_level",
+        name="Battery level",
+        device_class=SensorDeviceClass.ENUM,
+        options=list(BATTERY_LEVELS.values()),
+    ), 'battery_level'),
+    (SensorEntityDescription(
+        key="engine_battery_state",
+        name="Battery state",
+        device_class=SensorDeviceClass.ENUM,
+        options=list(BATTERY_STATES.values()),
+    ), 'battery_state'),
+    (SensorEntityDescription(
+        key="engine_knob_angle",
+        name="Knob angle",
+        native_unit_of_measurement=DEGREE,
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=False,
+    ), 'knob_angle'),
+    (SensorEntityDescription(
+        key="engine_charging_fault",
+        name="Charging fault",
+        device_class=SensorDeviceClass.ENUM,
+        options=list(CHARGING_FAULTS.values()),
+        entity_category=EntityCategory.DIAGNOSTIC,
+    ), 'charging_fault'),
+)
+
+
+class CombustionEngineStatusSensor(CombustionEntity, SensorEntity):
+    """One value from the Engine Status message, available while connected."""
+
+    def __init__(self, engine_connection, serial: str, description, attribute: str) -> None:
+        """Initialize."""
+        super().__init__(serial, device_name='Engine')
+        self._engine_connection = engine_connection
+        self.device_serial_number = serial
+        self._attribute = attribute
+        self._attr_has_entity_name = True
+        self._attr_unique_id = f'{serial}--{description.key}'
+        self.entity_description = description
+
+    @property
+    def name(self):
+        """Sensor name."""
+        return self.entity_description.name
+
+    @property
+    def available(self) -> bool:
+        """Available while the Engine is connected and reporting."""
+        return self._engine_connection.status(self.device_serial_number) is not None
+
+    async def async_added_to_hass(self) -> None:
+        """Follow the Engine connection rather than advertisements."""
+        self.async_on_remove(self._engine_connection.add_listener(self.async_write_ha_state))
+
+    @property
+    def native_value(self):
+        """Return the current value."""
+        status = self._engine_connection.status(self.device_serial_number)
+        return None if status is None else getattr(status, self._attribute)
+
+    @property
+    def extra_state_attributes(self):
+        """Name the control device on the control temperature sensor."""
+        if self._attribute != 'control_temperature':
+            return None
+        status = self._engine_connection.status(self.device_serial_number)
+        if status is None:
+            return None
+        return {
+            'control_device_type': status.control_device_type,
+            'control_device_serial': status.control_device_serial,
+        }
+
 
 class CombustionGaugeTemperatureSensor(CombustionEntity, SensorEntity):
     """Temperature sensor for a Combustion Gauge."""
@@ -153,6 +318,42 @@ class CombustionGaugeTemperatureSensor(CombustionEntity, SensorEntity):
             return self.probe_manager.probe_data(self.device_serial_number).temperature
         except Exception as ex:
             _LOGGER.debug("Error getting gauge temperature for native_value: %s", ex)
+            return None
+
+class CombustionEngineSetPointSensor(CombustionEntity, SensorEntity):
+    """Target temperature of a Combustion Engine."""
+
+    def __init__(self, probe_manager: ProbeManager, engine_data) -> None:
+        """Initialize."""
+        super().__init__(engine_data.serial_number, device_name='Engine')
+        self.device_serial_number = engine_data.serial_number
+        self.probe_manager = probe_manager
+        self._attr_has_entity_name = True
+        self._attr_unique_id = f'{engine_data.serial_number}--engine-set-point'
+        self.entity_description = VIRTUAL_TEMPERATURE_SENSOR_DESCRIPTION
+
+    @property
+    def should_poll(self) -> bool:
+        """Do not poll for updates."""
+        return False
+
+    @property
+    def name(self):
+        """Sensor name."""
+        return 'Set point'
+
+    @callback
+    def on_update(self):
+        """Process engine updates."""
+        self.async_write_ha_state()
+
+    @property
+    def native_value(self) -> float | None:
+        """Return the engine's target temperature, or None when none is set."""
+        try:
+            return self.probe_manager.probe_data(self.device_serial_number).set_point
+        except Exception as ex:
+            _LOGGER.debug("Error getting engine set point for native_value: %s", ex)
             return None
 
 GAUGE_ZONE_SENSOR_DESCRIPTION = SensorEntityDescription(
@@ -262,7 +463,7 @@ class CombustionRSSISensor(CombustionEntity, SensorEntity):
         self._attr_unique_id = f'{probe_data.serial_number}--rssi'
         self.entity_description = RSSI_SENSOR_DESCRIPTION
         # A repeater's only real self-data is its signal, so surface it.
-        if probe_data.device_type in ('BOOSTER', 'DISPLAY'):
+        if probe_data.device_type in ('BOOSTER', 'DISPLAY', 'ENGINE'):
             self._attr_entity_registry_enabled_default = True
 
     @property

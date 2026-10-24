@@ -41,12 +41,14 @@ from .const import (
     CONF_CLOUD_SYNC_ENABLED,
     CONF_DEVICES,
     CONF_ENABLE_ACTIVE_CONNECTION,
+    CONF_ENABLE_ENGINE_CONNECTION,
     CONF_HISTORY_ENABLED,
     CONF_LOCAL_CAPTURE_ENABLED,
     CONF_UPDATE_THROTTLE,
     DEFAULT_AVAILABILITY_TIMEOUT,
     DEFAULT_CLOUD_SYNC_ENABLED,
     DEFAULT_ENABLE_ACTIVE_CONNECTION,
+    DEFAULT_ENABLE_ENGINE_CONNECTION,
     DEFAULT_HISTORY_ENABLED,
     DEFAULT_LOCAL_CAPTURE_ENABLED,
     DEFAULT_UPDATE_THROTTLE,
@@ -414,6 +416,13 @@ class CombustionOptionsFlowHandler(config_entries.OptionsFlowWithReload):
                     default=options.get(
                         CONF_ENABLE_ACTIVE_CONNECTION,
                         DEFAULT_ENABLE_ACTIVE_CONNECTION,
+                    ),
+                ): bool,
+                vol.Optional(
+                    CONF_ENABLE_ENGINE_CONNECTION,
+                    default=options.get(
+                        CONF_ENABLE_ENGINE_CONNECTION,
+                        DEFAULT_ENABLE_ENGINE_CONNECTION,
                     ),
                 ): bool,
                 vol.Optional(

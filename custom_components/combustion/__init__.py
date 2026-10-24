@@ -15,6 +15,7 @@ from homeassistant.loader import async_get_integration
 from custom_components.combustion.bluetooth_listener import BluetoothListener
 from custom_components.combustion.connection_manager import ConnectionManager
 from custom_components.combustion.control_manager import ControlManager
+from custom_components.combustion.engine_connection import EngineConnectionManager
 from custom_components.combustion.prediction_manager import PredictionManager
 from custom_components.combustion.probe_manager import ProbeManager
 
@@ -25,12 +26,14 @@ from .const import (
     CONF_AVAILABILITY_TIMEOUT,
     CONF_CLOUD_SYNC_ENABLED,
     CONF_ENABLE_ACTIVE_CONNECTION,
+    CONF_ENABLE_ENGINE_CONNECTION,
     CONF_HISTORY_ENABLED,
     CONF_LOCAL_CAPTURE_ENABLED,
     CONF_UPDATE_THROTTLE,
     DEFAULT_AVAILABILITY_TIMEOUT,
     DEFAULT_CLOUD_SYNC_ENABLED,
     DEFAULT_ENABLE_ACTIVE_CONNECTION,
+    DEFAULT_ENABLE_ENGINE_CONNECTION,
     DEFAULT_HISTORY_ENABLED,
     DEFAULT_LOCAL_CAPTURE_ENABLED,
     DEFAULT_UPDATE_THROTTLE,
@@ -248,6 +251,11 @@ async def async_setup_entry(
     enable_active_connection = entry.options.get(
         CONF_ENABLE_ACTIVE_CONNECTION, DEFAULT_ENABLE_ACTIVE_CONNECTION
     )
+    enable_engine_connection = bool(
+        entry.options.get(
+            CONF_ENABLE_ENGINE_CONNECTION, DEFAULT_ENABLE_ENGINE_CONNECTION
+        )
+    )
     history_enabled = bool(
         entry.options.get(CONF_HISTORY_ENABLED, DEFAULT_HISTORY_ENABLED)
     )
@@ -274,6 +282,12 @@ async def async_setup_entry(
         hass, entry, connection_manager, probe_manager
     )
     control_manager = ControlManager(connection_manager)
+    engine_connection = EngineConnectionManager(
+        hass,
+        entry,
+        enable_engine_connection,
+        min_notify_interval_seconds=float(update_throttle),
+    )
 
     runtime = CombustionRuntime(
         bluetooth_listener=listener,
@@ -287,6 +301,7 @@ async def async_setup_entry(
     hass.data[DOMAIN] = probe_manager
     hass.data[f"{DOMAIN}_prediction"] = prediction_manager
     hass.data[f"{DOMAIN}_connection"] = connection_manager
+    hass.data[f"{DOMAIN}_engine_connection"] = engine_connection
 
     probe_manager.connection_manager = connection_manager
     probe_manager.control_manager = control_manager
@@ -300,6 +315,7 @@ async def async_setup_entry(
     listener.async_init()
     prediction_manager.async_init()
     connection_manager.async_init()
+    engine_connection.async_init()
 
     if history_enabled:
         runtime.create_optional_task(
@@ -369,4 +385,5 @@ async def async_unload_entry(
         hass.data.pop(f"{DOMAIN}_prediction", None)
     if hass.data.get(f"{DOMAIN}_connection") is runtime.connection_manager:
         hass.data.pop(f"{DOMAIN}_connection", None)
+    hass.data.pop(f"{DOMAIN}_engine_connection", None)
     return True
